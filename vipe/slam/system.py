@@ -117,7 +117,7 @@ class SLAMSystem:
             Adding more views requires adding factors to the graph to keep the null-space. 
             This is currently not supported for now."""
 
-            self.metric_depth = make_depth_model(self.config.keyframe_depth)
+            self.metric_depth = make_depth_model(self.config.keyframe_depth,self.config.dataset,self.config.dataset_path,self.config.sequence_name)
             assert self.metric_depth.depth_type in [
                 DepthType.METRIC_DEPTH,
                 DepthType.MODEL_METRIC_DEPTH,

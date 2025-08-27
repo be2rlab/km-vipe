@@ -16,7 +16,21 @@
 from .base import DepthEstimationInput, DepthEstimationModel, DepthEstimationResult, DepthType
 
 
-def make_depth_model(model: str):
+def make_depth_model(model: str, dataset: str | None = None,dataset_path: str | None = None, scene: str | None = None):
+    if model == 'dataset':
+        if dataset is not None:
+            if dataset_path is not None:
+                if scene is not None:
+                    from .dataset_depth import Datasetdepth
+                    return Datasetdepth(dataset,dataset_path,scene)
+                else:
+                    raise ValueError(f"Define the sequence name")
+            else:
+                raise ValueError(f"Define the dataset path!")
+        else:
+            raise ValueError(f"Define the dataset name")
+
+
     if "-" not in model:
         model_name, model_sub = model, ""
     else:
