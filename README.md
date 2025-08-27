@@ -14,7 +14,19 @@ We use ViPE to annotate a large-scale collection of videos. This collection incl
 **[Technical Whitepaper](https://research.nvidia.com/labs/toronto-ai/vipe/assets/paper.pdf), [Project Page](https://research.nvidia.com/labs/toronto-ai/vipe), [Dataset](https://huggingface.co/) (Coming Soon)**
 
 ## Installation
+### Docker
+```bash
+# Build new docker image
+docker compose build vipe
 
+# Run docker image
+docker compose run vipe
+
+# Inside docker
+pip install --no-build-isolation -e .
+```
+
+### Conda
 To ensure the reproducibility, we recommend creating the runtime environment using [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html).
 
 ```bash
