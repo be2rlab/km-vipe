@@ -1,0 +1,3 @@
+[submodule "vipe/perception/algorithms/ultralytics"]
+	path = vipe/perception/algorithms/ultralytics
+	url = https://github.com/be2rlab/ultralytics.git

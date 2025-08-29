@@ -64,6 +64,10 @@ class SparseTracks(ABC):
             .to(keypoint_indices.device)
             .float()
         )
+    # the main loop that iterates through each term (frame pair) 
+    # involves moving data between the CPU and GPU (.cpu().numpy(), .cuda()) in every iteration. 
+    # This is a common pattern for simplifying implementation but can be a performance bottleneck 
+    # when dealing with a large number of terms.
 
     def compute_dense_disp_target_weight(
         self,

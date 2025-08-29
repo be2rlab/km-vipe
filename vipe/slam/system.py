@@ -237,7 +237,7 @@ class SLAMSystem:
                 "camera_type": camera_type,
             }
         )
-
+        # Check point from 26.08.25-03.32.00
         self._build_components()
 
         if self.visualize:
