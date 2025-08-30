@@ -168,7 +168,6 @@ vipe_results/
 /external/
 JIAHUI.md
 .vscode/*
-#add engines to storage
 **.engine
-#add models to storage
+**.onnx
 **.pt
