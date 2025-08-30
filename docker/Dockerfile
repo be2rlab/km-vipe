@@ -37,6 +37,4 @@ RUN apt update && apt install -y libeigen3-dev zlib1g-dev
 
 WORKDIR /home/${USER}/km-vipe
 
-RUN pip install -e .
-
 CMD ["/bin/bash"]
