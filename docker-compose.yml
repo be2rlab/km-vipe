@@ -15,8 +15,9 @@ services:
       - VGL_DISPLAY=${RENDER_DISPLAY:-":1"}
     volumes:
       - /tmp/.X11-unix/:/tmp/.X11-unix
-      - ./:/home/docker_user/ViPE
-      - .cache/:/home/docker_user/.cache
+      - $ROOT_DIR/:/home/user/km-vipe
+      - .cache/:/home/user/.cache/
+      - $DATA_DIR/:/data
     runtime: nvidia
     privileged: true
     command: bash

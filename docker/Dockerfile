@@ -1,8 +1,9 @@
-FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
+FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel AS base
+
 
 SHELL [ "/bin/bash", "-c" ]
 ENV DEBIAN_FRONTEND noninteractive
-ENV USER=docker_user
+ENV USER=root
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -10,25 +11,32 @@ RUN apt-get update && \
         xterm xauth openssh-server tmux wget mate-desktop-environment-core && \
     rm -rf /var/lib/apt/lists/*
 
-ENV CONDA_DIR /opt/conda
-ENV PATH=${CONDA_DIR}/bin:$PATH
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
-    /bin/bash ~/miniconda.sh -b -p /opt/conda
 
-WORKDIR /home/${USER}/
+
+# Install dependencies for OpenGL and Nvidia driver
+RUN apt-get update \
+  && apt-get install -y -qq --no-install-recommends \
+  libglvnd0 \
+  libgl1 \
+  libglx0 \
+  libegl1 \
+  libxext6 \
+  libx11-6
+
+# Set Nvidia-related environment variables
+ENV NVIDIA_VISIBLE_DEVICES all
+ENV NVIDIA_DRIVER_CAPABILITIES graphics,utility,compute
+ENV QT_X11_NO_MITSHM 1
+
 COPY ../envs/ envs/
 
-RUN conda env create -f "envs/base.yml" -n vipe_env 
-RUN conda run -n vipe_env python -m pip install -r envs/requirements.txt
+RUN pip install -r envs/requirements.txt
 
-ARG UID=1000
-ARG GID=1000
-RUN useradd -m ${USER} --uid=${UID} \
-    && usermod -s /bin/bash ${USER} \
-    && usermod -a -G sudo ${USER} \
-    && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
-WORKDIR /home/${USER}/ViPE
-RUN chown -R $USER /home/${USER}
-USER ${USER}
 
-RUN echo 'source activate vipe_env' >> /home/${USER}/.bashrc
+RUN apt update && apt install -y libeigen3-dev zlib1g-dev
+
+WORKDIR /home/${USER}/km-vipe
+
+RUN pip install -e .
+
+CMD ["/bin/bash"]

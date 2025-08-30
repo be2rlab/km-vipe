@@ -168,3 +168,6 @@ vipe_results/
 /external/
 JIAHUI.md
 .vscode/*
+**.engine
+**.onnx
+**.pt
