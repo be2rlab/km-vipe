@@ -12,8 +12,7 @@ from vipe.perception.knowledge.segmenter.utils import (
 import tensorrt as trt
 import sys
 
-sys.path.append("/workspace/perception/algorithms")
-from mobilesamv2 import ObjectAwareModel  # noqa: E402
+from vipe.perception.algorithms.mobilesamv2 import ObjectAwareModel  # noqa: E402
 
 
 class MobileSAMv2:
