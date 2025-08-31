@@ -3,7 +3,7 @@ FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel AS base
 
 SHELL [ "/bin/bash", "-c" ]
 ENV DEBIAN_FRONTEND noninteractive
-ENV USER=root
+ENV USER=user
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
