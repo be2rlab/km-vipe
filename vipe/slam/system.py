@@ -250,17 +250,19 @@ class SLAMSystem:
         for frame_idx, frame_data_list in pbar(
             enumerate(zip(*video_streams)), desc="SLAM Pass (1/2)", total=total_n_frames
         ):
+            
             images, buffer_masks = self._precompute_features(frame_data_list)
-
+            
             self.sparse_tracks.track_image(frame_data_list)
-
+            
             if self.motion_filter.check(images, buffer_masks) or frame_idx == total_n_frames - 1:
                 is_keyframe = True
                 self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=1)
             else:
                 is_keyframe = False
-
+            
             self.frontend.run()
+            
 
             if self.visualize:
                 self.buffer.log(self.config.map_filter_thresh)

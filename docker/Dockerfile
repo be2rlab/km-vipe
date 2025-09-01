@@ -28,6 +28,12 @@ ENV NVIDIA_VISIBLE_DEVICES all
 ENV NVIDIA_DRIVER_CAPABILITIES graphics,utility,compute
 ENV QT_X11_NO_MITSHM 1
 
+RUN apt-get update && apt-get install -y \
+  libxkbcommon-x11-0 libxkbcommon0 \
+  libx11-xcb1 libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+  libgl1 libvulkan1
+
+
 COPY ../envs/ envs/
 
 RUN pip install -r envs/requirements.txt
