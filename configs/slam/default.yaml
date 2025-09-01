@@ -1,3 +1,5 @@
+defaults:
+  - /dataset: replica
 buffer: 1024
 # weight for translation / rotation components of flow
 beta: 0.3
@@ -50,7 +52,3 @@ ba:
 
 sparse_tracks:
   name: dummy
-
-dataset: replica
-dataset_path: /data/
-sequence_name: room0
