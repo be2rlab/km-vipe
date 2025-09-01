@@ -68,12 +68,14 @@ class DepthEstimationInput:
         we use numpy here mainly to enforce CPU tensor.
     - focal_length: The focal length of the camera.
         with a simple pinhole assumption where fx = fy and cx = w/2, cy = h/2.
+    - index: index of the rgb image to find the corresponding depth image in the dataset.
     """
 
     rgb: torch.Tensor | None = None
     video_frame_list: list[np.ndarray] | None = None
     prompt_metric_depth: torch.Tensor | None = None
     focal_length: float | None = None
+    index: int | None = None
 
 
 class DepthEstimationModel(ABC):
