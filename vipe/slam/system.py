@@ -119,9 +119,10 @@ class SLAMSystem:
             assert self.config.n_views == 1, """Currently the global scale lies in the null-space of the SLAM problem. 
             Adding more views requires adding factors to the graph to keep the null-space. 
             This is currently not supported for now."""
-            dataset_name = self.get_config_value(self.config.dataset, "dataset_name")
-            dataset_path = self.get_config_value(self.config.dataset, "dataset_path")
-            sequence_name = self.get_config_value(self.config.dataset, "sequence_name")
+            dataset_cfg = getattr(self.config, "dataset", None)
+            dataset_name = self.get_config_value(dataset_cfg, "dataset_name")
+            dataset_path = self.get_config_value(dataset_cfg, "dataset_path")
+            sequence_name = self.get_config_value(dataset_cfg, "sequence_name")
             # self.metric_depth = make_depth_model(self.config.keyframe_depth,self.config.dataset.dataset_name,self.config.dataset.dataset_path,self.config.dataset.sequence_name)
             self.metric_depth = make_depth_model(self.config.keyframe_depth,dataset_name,dataset_path,sequence_name)
             assert self.metric_depth.depth_type in [

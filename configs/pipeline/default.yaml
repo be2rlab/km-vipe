@@ -1,5 +1,5 @@
 defaults:
-  - /slam: default
+  - /slam: replica
 
 instance: vipe.pipeline.default.DefaultAnnotationPipeline
 
