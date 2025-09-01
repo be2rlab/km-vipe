@@ -259,6 +259,7 @@ class GraphBuffer:
             depth_input = DepthEstimationInput(
                 rgb=self.images[frame_idx].moveaxis(1, -1).float(),
                 focal_length=focal_length,
+                index= frame_idx
             )
             disp_sens = depth_model.estimate(depth_input).metric_depth
             disp_sens = disp_sens[:, 3::8, 3::8]
