@@ -171,3 +171,4 @@ JIAHUI.md
 **.engine
 **.onnx
 **.pt
+.models_cache/*
