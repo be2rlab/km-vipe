@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y \
   libx11-xcb1 libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
   libgl1 libvulkan1
 
+RUN pip install ultralytics
 
 COPY ../envs/ envs/
 
