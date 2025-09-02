@@ -254,6 +254,22 @@ class YOLOESegTracker:
         # Reset origin mask to backup state
         self.reset_origin_merged_mask(bc_mask, bc_id)
 
+        # annotated_frame = visualize_detection_results(
+        #     origin_frame, 
+        #     refined_merged_mask, 
+        #     seg_info,
+        #     show_masks=True,
+        #     show_boxes=True,
+        #     show_labels=True,
+        #     mask_alpha=0.3  # Adjust transparency
+        # )
+
+        # # Display results
+        # display_results(origin_frame, annotated_frame, refined_merged_mask, seg_info)
+
+        # # Save the annotated image
+        # save_results(annotated_frame, f"/data/annotated_result{self.curr_idx}.jpg")
+        
         return refined_merged_mask, annotated_frame_shape, seg_info
 
     def detect_and_seg_all_classes(

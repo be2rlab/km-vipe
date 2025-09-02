@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y \
   libgl1 libvulkan1
 
 RUN pip install ultralytics
+RUN git clone https://github.com/facebookresearch/dinov3.git /home/${USER}/dinov3
 
 COPY ../envs/ envs/
 
