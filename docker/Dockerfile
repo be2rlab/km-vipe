@@ -43,6 +43,7 @@ RUN pip install -r envs/requirements.txt
 
 RUN apt update && apt install -y libeigen3-dev zlib1g-dev
 
+RUN pip install scikit-learn
 WORKDIR /home/${USER}/km-vipe
 
 CMD ["/bin/bash"]
