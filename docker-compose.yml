@@ -17,6 +17,7 @@ services:
       - /tmp/.X11-unix/:/tmp/.X11-unix
       - $ROOT_DIR/:/home/user/km-vipe
       - .cache/:/home/user/.cache/
+      - .models_cache/:/root/.cache/
       - $DATA_DIR/:/data
     runtime: nvidia
     privileged: true
