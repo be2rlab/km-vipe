@@ -27,9 +27,10 @@ from vipe.priors.depth.priorda import PriorDAModel
 from vipe.priors.depth.videodepthanything import VdieoDepthAnythingDepthModel
 from vipe.priors.geocalib import GeoCalib
 from vipe.priors.track_anything import TrackAnythingPipeline
-from vipe.priors.track_anything import EmbeddingsPipeline
+from vipe.priors.embedding import EmbeddingsPipeline
 from vipe.slam.interface import SLAMOutput
 from vipe.streams.base import CachedVideoStream, FrameAttribute, StreamProcessor, VideoFrame, VideoStream
+from vipe.priors.embedding.dinov3 import DinoV3Variant
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
 from vipe.utils.misc import unpack_optional
@@ -306,28 +307,21 @@ class AdaptiveDepthProcessor(StreamProcessor):
 
 class EmbeddingsProcessor(StreamProcessor):
     """
-    A processor that tracks masks and generates embeddings for each mask.
+    A processor that tracks a mask caption in the video.
     """
 
     def __init__(
         self,
-        sam_run_gap: int = 30,
-        mask_expand: int = 5,
+        model_variant: DinoV3Variant = DinoV3Variant.VITHP,
+        weights_dir: str = "/home/user/km-vipe/weights/dinov3",
     ) -> None:
-        self.sam_run_gap = sam_run_gap
-
-        self.tracker = EmbeddingsPipeline(sam_points_per_side=50, sam_run_gap=self.sam_run_gap)
-        self.mask_expand = mask_expand
+        
+        self.embedder = EmbeddingsPipeline(model_variant=model_variant, weights_dir=weights_dir)
 
     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
-        return previous_attributes | {FrameAttribute.INSTANCE, FrameAttribute.MASK}
+        return previous_attributes | {FrameAttribute.FEATURES, FrameAttribute.FEATURES_PATCH_SIZE}
 
     def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
-        frame.instance, frame.instance_phrases = self.tracker.track(frame)
-        print("track anything phrases:", frame.instance_phrases)
-        print("-====-=-=-=-=-=-=-=-=--=-=-=-=")
-        self.last_track_frame = frame.raw_frame_idx
-
-        frame_instance_mask = frame.instance == 0
-        frame.mask = erode(frame_instance_mask, self.mask_expand)
+        frame.features, frame.features_patch_size = self.embedder.process_frame(frame)
         return frame
+

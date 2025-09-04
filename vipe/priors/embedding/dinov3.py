@@ -13,33 +13,64 @@ import torchvision.transforms.functional as TVTF
 from torch import Tensor, nn
 import time
 import contextlib
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 
 
+class DinoV3Variant(str, Enum):
+    VITS   = "vits16"
+    VITSP  = "vits16plus"
+    VITB   = "vitb16"
+    VITL   = "vitl16"
+    VITHP  = "vith16plus"
+    VIT7B  = "vit7b16"
 
-MODEL_DINOV3_VITS = "dinov3_vits16"
-MODEL_DINOV3_VITSP = "dinov3_vits16plus"
-MODEL_DINOV3_VITB = "dinov3_vitb16"
-MODEL_DINOV3_VITL = "dinov3_vitl16"
-MODEL_DINOV3_VITHP = "dinov3_vith16plus"
-MODEL_DINOV3_VIT7B = "dinov3_vit7b16"
+# --- Config -----------------------------------------------------------------
 
-MODEL_TO_NUM_LAYERS = {
-    MODEL_DINOV3_VITS: 12,
-    MODEL_DINOV3_VITSP: 12,
-    MODEL_DINOV3_VITB: 12,
-    MODEL_DINOV3_VITL: 24,
-    MODEL_DINOV3_VITHP: 32,
-    MODEL_DINOV3_VIT7B: 40,
+@dataclass(frozen=True)
+class DinoV3Config:
+    hub_id: str              # e.g. "dinov3_vits16"
+    num_layers: int          # transformer depth
+    weights_filename: Optional[str] = None  # filename or None if not provided
+
+# A single registry is easier to maintain than 3 separate dicts.
+REGISTRY: Dict[DinoV3Variant, DinoV3Config] = {
+    DinoV3Variant.VITS:  DinoV3Config("dinov3_vits16",      12, "dinov3_vits16_pretrain_lvd1689m-08c60483.pth"),
+    DinoV3Variant.VITSP: DinoV3Config("dinov3_vits16plus",  12, "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth"),
+    DinoV3Variant.VITB:  DinoV3Config("dinov3_vitb16",      12, "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"),
+    DinoV3Variant.VITL:  DinoV3Config("dinov3_vitl16",      24, "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"),
+    DinoV3Variant.VITHP: DinoV3Config("dinov3_vith16plus",  32, "dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth"),
+    DinoV3Variant.VIT7B: DinoV3Config("dinov3_vit7b16",     40, "dinov3_vit7b16_pretrain_lvd1689m-a955f4ea.pth"),
 }
 
-MODEL_WEIGHTS = {
-    MODEL_DINOV3_VITS: "",
-    MODEL_DINOV3_VITSP: "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
-    MODEL_DINOV3_VITB: "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
-    MODEL_DINOV3_VITL: "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
-    MODEL_DINOV3_VITHP: "dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth",
-    MODEL_DINOV3_VIT7B: ""
+Alias = Union[DinoV3Variant, str]
+
+_ALIAS_NORMALIZATION = {
+    "vits": "vits16", "vits16": "vits16",
+    "vitsp": "vits16plus", "vits16plus": "vits16plus",
+    "vitb": "vitb16", "vitb16": "vitb16",
+    "vitl": "vitl16", "vitl16": "vitl16",
+    "vithp": "vith16plus", "vith": "vith16plus", "vith16plus": "vith16plus",
+    "vit7b": "vit7b16", "vit7b16": "vit7b16",
 }
+
+def _normalize_alias(x: str) -> str:
+    s = x.lower().replace("_", "").replace("-", "")
+    if s.startswith("dinov3"):
+        s = s.replace("dinov3", "", 1)
+    s = s.strip()
+    return _ALIAS_NORMALIZATION.get(s, s)
+
+def get_config(variant: Alias) -> DinoV3Config:
+    """Accepts DinoV3Variant or a string alias ('vitl', 'dinov3_vitl16', etc.)."""
+    if isinstance(variant, DinoV3Variant):
+        return REGISTRY[variant]
+    norm = _normalize_alias(variant)
+    for v in DinoV3Variant:
+        if v.value == norm:
+            return REGISTRY[v]
+    raise KeyError(f"Unknown DINOv3 variant: {variant!r}")
 
 
 @torch.compile(disable=True)
@@ -96,78 +127,81 @@ class DINOv3EmbeddingEngine:
     
     def __init__(
         self,
-        model_name: str = MODEL_DINOV3_VITL,
-        weights_path: Optional[str] = None,
+        model: Alias = DinoV3Variant.VITL,
+        weights_path: Optional[Union[str, Path]] = None,
+        weights_dir: Optional[Union[str, Path]] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        short_side: int = 768
+        short_side: int = 768,
     ):
         """
-        Initialize the DINOv3 segmentation tracker.
+        Initialize the DINOv3 engine.
         
         Args:
-            model_name: Name of the DINOv3 model to use
-            weights_path: Path to custom weights file (optional)
-            device: Device to run on ('cuda' or 'cpu')
-            short_side: Target size for the short side of input images
+            model: Variant enum or alias string ('vitl', 'dinov3_vitl16', etc.)
+            weights_path: Explicit path to weights (overrides registry)
+            weights_dir: If provided, will join with registry filename
+            device: 'cuda' or 'cpu'
+            short_side: Target short side for preprocessing (used by ResizeTransform)
         """
         self.device = device
-        self.model_name = model_name
         self.short_side = short_side
-        self.n_layers = MODEL_TO_NUM_LAYERS[self.model_name]
-        
+
+        # Resolve config from alias/enum
+        self.cfg = get_config(model)
+        self.n_layers = self.cfg.num_layers
+
+        # Resolve weights path
+        if weights_path is None and self.cfg.weights_filename and weights_dir is not None:
+            weights_path = Path(weights_dir) / self.cfg.weights_filename
+        self.weights_path = str(weights_path) if isinstance(weights_path, Path) else weights_path
+        print(f"Using weights path: {self.weights_path}")
         # Initialize model
-        if weights_path is None:
-            weights_path = MODEL_WEIGHTS.get(model_name, None)
-        self.model = self._load_model(model_name, weights_path)
-        self.patch_size = self.model.patch_size
-        self.embed_dim = self.model.embed_dim
-        
+        self.model = self._load_model(self.cfg.hub_id, self.weights_path)
+        self.patch_size = getattr(self.model, "patch_size", 16)
+        self.embed_dim = getattr(self.model, "embed_dim", None)
+
         # Initialize transform
         self.transform = self._create_transform()
-        
+
         # Initialize tracking state
         self.reset_state()
         
-        print(f"Initialized DINOv3 tracker:")
-        print(f"  Model: {model_name}")
+        print(f"Initialized DINOv3 engine:")
+        print(f"  Variant hub_id: {self.cfg.hub_id}")
+        print(f"  Num layers: {self.n_layers}")
         print(f"  Patch size: {self.patch_size}")
         print(f"  Embedding dimension: {self.embed_dim}")
         print(f"  Device: {self.device}")
     
-    def _load_model(self, model_name: str, weights_path: Optional[str]) -> nn.Module:
-        """Load DINOv3 model with optional custom weights."""
+    def _load_model(self, hub_id: str, weights_path: Optional[str]) -> nn.Module:
+        """Load DINOv3 model via torch.hub with optional local weights."""
         try:
+            model = torch.hub.load(
+                repo_or_dir="facebookresearch/dinov3",
+                model=hub_id,
+                source="github",
+            )
+
             if weights_path and os.path.exists(weights_path):
-                # Load with custom weights
-                model = torch.hub.load(
-                    repo_or_dir="facebookresearch/dinov3",
-                    model=model_name,
-                    source="github",
-                    weights=weights_path
-                )
-            else:
-                # Load with default weights
-                model = torch.hub.load(
-                    repo_or_dir="facebookresearch/dinov3",
-                    model=model_name,
-                    source="github"
-                )
-            
+                state = torch.load(weights_path, map_location="cpu")
+                # Some DINO checkpoints need strict=False
+                model.load_state_dict(state, strict=False)
+
             model.to(self.device)
             model.eval()
             torch.set_grad_enabled(False)
-            
             return model
-            
+
         except Exception as e:
-            print(f"Error loading model: {e}")
-            print("Falling back to local loading...")
-            # Fallback for local loading (adjust path as needed)
+            print(f"Error loading model from hub ({e}). Falling back to local repo path...")
             model = torch.hub.load(
                 repo_or_dir="/home/user/dinov3",
-                model=model_name,
-                source="local"
+                model=hub_id,
+                source="local",
             )
+            if weights_path and os.path.exists(weights_path):
+                state = torch.load(weights_path, map_location="cpu")
+                model.load_state_dict(state, strict=False)
             model.to(self.device)
             model.eval()
             return model
@@ -175,8 +209,7 @@ class DINOv3EmbeddingEngine:
     def _create_transform(self) -> TVT.Compose:
         """Create image preprocessing transform."""
         return TVT.Compose([
-            # ResizeToMultiple(short_side=self.short_side, multiple=self.patch_size),
-            ResizeTransform(patch_size=self.patch_size),
+            ResizeTransform(image_size=self.short_side, patch_size=self.patch_size),
             TVT.ToTensor(),
             TVT.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
@@ -271,7 +304,6 @@ class DINOv3EmbeddingEngine:
         masks_tensor = torch.as_tensor(masks, device=self.device, dtype=torch.long)  # [H,W]
 
         # (2) resize to feature resolution with nearest kernel
-        # Use "nearest" for broad compatibility; "nearest-exact" is OK if available.
         masks_resized = F.interpolate(
             masks_tensor[None, None].float(),  # [1,1,H,W]
             size=(h, w),
@@ -636,9 +668,9 @@ class DINOv3EmbeddingEngine:
 
 
 def demo_usage():
-    
     tracker = DINOv3EmbeddingEngine(
-        model_name=MODEL_DINOV3_VITHP,
+        model=DinoV3Variant.VITHP,                # or "vithp" / "dinov3_vith16plus"
+        weights_dir="/home/user/km-vipe/weights/dinov3"         # used if registry has a filename
     )
     
     dummy_frames = []
@@ -647,6 +679,7 @@ def demo_usage():
         test_image = dummy_frames[-1]
         t0 = time.time()
         features = tracker.embed_frame(test_image)  # Warm-up
+        print(f"Frame {i} embedded: features shape {features.shape}, dtype {features.dtype}, device {features.device}")
         t1 = time.time()
         print(f"Warm-up embedding time: {t1 - t0:.3f} seconds")
         tracker.visualize_embeddings(features, test_image, method="pca", num_components=3, 
