@@ -43,7 +43,7 @@ infill_dense_disp: False
 # (This is also used for dense disp extraction)
 map_filter_thresh: 0.05
 # Whether to visualize the results using rerun
-visualize: false
+visualize: true
 # Use keyframe depth for recovering metric depth
 keyframe_depth: dataset
 
@@ -51,4 +51,4 @@ ba:
   dense_disp_alpha: 0.001
 
 sparse_tracks:
-  name: dummy
+  name: eloftr

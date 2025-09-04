@@ -252,14 +252,22 @@ class SLAMSystem:
             rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         # Run frontend to get attributes initialization. This will also populate attribute buffers.
+        from itertools import tee
+
+        # duplicate the iterator so we can peek ahead
+        stream_iter1, stream_iter2 = tee(zip(*video_streams))
+        next(stream_iter2, None)  # advance second iterator by one
+
         frame_data_list: list[VideoFrame]
         frame_idx: int = 0
-        for frame_idx, frame_data_list in pbar(
-            enumerate(zip(*video_streams)), desc="SLAM Pass (1/2)", total=total_n_frames
+        for frame_idx, (frame_data_list, next_frame_data_list) in pbar(
+            enumerate(zip(stream_iter1, stream_iter2)),
+            desc="SLAM Pass (1/2)",
+            total=total_n_frames - 1,  # last frame has no "next"
         ):
             images, buffer_masks = self._precompute_features(frame_data_list)
 
-            self.sparse_tracks.track_image(frame_data_list)
+            self.sparse_tracks.track_image(frame_data_list,next_frame_data_list)
 
             if self.motion_filter.check(images, buffer_masks) or frame_idx == total_n_frames - 1:
                 is_keyframe = True

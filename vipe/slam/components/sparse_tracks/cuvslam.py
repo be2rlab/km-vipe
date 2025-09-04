@@ -64,7 +64,7 @@ class CuVSLAMSparseTracks(SparseTracks):
         self.tracker = tracker
         self.frame_idx = 0
 
-    def track_image(self, frame_data_list: list[VideoFrame]) -> None:
+    def track_image(self, frame_data_list: list[VideoFrame],frame_data_list2: list[VideoFrame]) -> None:
         if self.tracker is None:
             self._build_tracker(frame_data_list)
         assert self.tracker is not None, "Tracker not initialized"

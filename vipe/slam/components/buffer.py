@@ -522,6 +522,8 @@ class GraphBuffer:
 
         if verbose:
             logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+            # with open("/home/human/zaid/km-vipe/ba_log_eloftr_metric3d_depth.txt", "a") as f:
+            #     f.write(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}\n")
 
         self.disps.clamp_(min=0.001)
 

@@ -139,7 +139,7 @@ class SparseTracks(ABC):
 class DummySparseTracks(SparseTracks):
     enabled: bool = False
 
-    def track_image(self, frame_data_list: list[VideoFrame]) -> None:
+    def track_image(self, frame_data_list: list[VideoFrame],frame_data_list2: list[VideoFrame]) -> None:
         for obs in self.observations:
             obs.append({})
 
@@ -152,5 +152,9 @@ def build_sparse_tracks(config: DictConfig, n_views: int) -> SparseTracks:
         from .cuvslam import CuVSLAMSparseTracks
 
         return CuVSLAMSparseTracks(n_views)
+    if config.name == "eloftr":
+        from .eloftr import ELoFTRTracks
+
+        return ELoFTRTracks(n_views)
 
     raise ValueError(f"Unknown sparse tracks: {config.name}")

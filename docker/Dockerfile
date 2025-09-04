@@ -40,6 +40,9 @@ COPY ../envs/ envs/
 
 RUN pip install -r envs/requirements.txt
 
+COPY ./EfficientLoFTR/ EfficientLoFTR/
+
+RUN pip install -r EfficientLoFTR/requirements.txt 
 
 RUN apt update && apt install -y libeigen3-dev zlib1g-dev
 

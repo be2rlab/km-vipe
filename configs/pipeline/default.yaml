@@ -22,7 +22,7 @@ init:
     add_sky: true
 
 slam:
-  keyframe_depth: unidepth-l
+  keyframe_depth: metric3d-small
   optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
   visualize: true
 
