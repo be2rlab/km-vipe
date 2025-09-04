@@ -8,7 +8,6 @@ import matplotlib.cm as cm
 
 plt.style.use("dark_background")
 
-from base_matcher import BaseMatcher
 from copy import deepcopy
 from EfficientLoFTR.src.utils.plotting import (
     make_matching_figure,
