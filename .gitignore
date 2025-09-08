@@ -171,6 +171,7 @@ JIAHUI.md
 **.engine
 **.onnx
 **.pt
+**.pth
 .models_cache/*
 **.mp4
-weights/*
+weights/
