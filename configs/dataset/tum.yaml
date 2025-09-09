@@ -1,0 +1,3 @@
+dataset_name: tum
+dataset_path: /home/human/zaid/datasets/
+sequence_name: rgbd_dataset_freiburg1_desk

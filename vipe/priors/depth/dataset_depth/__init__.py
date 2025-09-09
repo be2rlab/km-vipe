@@ -18,8 +18,16 @@ class Datasetdepth(DepthEstimationModel):
         return DepthType.METRIC_DEPTH
     
     def estimate(self, src: DepthEstimationInput) -> DepthEstimationResult:
-        depth_img_name = f"depth{src.index:06d}.png"
-        depth_img_path = os.path.join(self.datasets_path, self.dataset, self.scene,'results',depth_img_name)
+        if self.dataset == 'replica':
+            depth_img_name = f"depth{src.index:06d}.png"
+            depth_img_path = os.path.join(self.datasets_path, self.dataset, self.scene,'results',depth_img_name)
+        elif self.dataset == 'tum':
+            association_file_path = os.path.join(self.datasets_path,self.dataset,self.scene,'associations.txt')
+            with open(association_file_path,'r') as f:
+                lines = f.readlines()
+            depth_img_name = lines[src.index].split()[3]   # <-- split() handles multiple spaces
+            depth_img_name = depth_img_name.strip()        # <-- remove \n or whitespace
+            depth_img_path = os.path.join(self.datasets_path,self.dataset,self.scene,depth_img_name)
         depth_img = cv2.imread(depth_img_path, cv2.IMREAD_UNCHANGED)
         to_tensor = T.ToTensor()
         depth_tensor = to_tensor(depth_img)  # shape: (1, H, W), values in [0,1] if uint8
