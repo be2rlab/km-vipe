@@ -45,6 +45,7 @@ RUN apt update && apt install -y libeigen3-dev zlib1g-dev
 
 RUN pip install scikit-learn
 RUN pip install ftfy regex tqdm
+RUN pip install notebook
 
 WORKDIR /home/${USER}/km-vipe
 
