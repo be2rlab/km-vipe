@@ -195,7 +195,7 @@ class DINOv3EmbeddingEngine:
         except Exception as e:
             print(f"Error loading model from hub ({e}). Falling back to local repo path...")
             model = torch.hub.load(
-                repo_or_dir="/home/user/dinov3",
+                repo_or_dir="/home/user/km-vipe/dino/dinov3",
                 model=hub_id,
                 source="local",
             )
