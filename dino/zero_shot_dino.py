@@ -12,7 +12,7 @@ from skimage import data
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-REPO_DIR = "dinov3/"
+REPO_DIR = "dino/dinov3/"
 
 backbone_weights = f"./weights/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
 weights = f"./weights/dinov3/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
