@@ -21,6 +21,9 @@ import imageio
 import numpy as np
 import torch
 
+from typing import Dict, Tuple
+import random
+import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 from pycg import image
 
@@ -489,3 +492,254 @@ def save_projection_video(
             img_text = image.text(text_desc)
             img_final = image.place_image(img_text, img_final, 0, 0)
             vw.write(img_final)
+
+
+
+def visualize_detection_results(
+    origin_frame: np.ndarray,
+    refined_merged_mask: np.ndarray,
+    seg_info: Dict[int, Dict[str, any]],
+    show_masks: bool = True,
+    show_boxes: bool = True,
+    show_labels: bool = True,
+    mask_alpha: float = 0.3,
+    box_thickness: int = 2,
+    font_scale: float = 0.6
+) -> np.ndarray:
+    """
+    Visualize detection and segmentation results
+    
+    Args:
+        origin_frame: Original input image
+        refined_merged_mask: Merged segmentation mask
+        seg_info: Dictionary with detection info
+        show_masks: Whether to show segmentation masks
+        show_boxes: Whether to show bounding boxes
+        show_labels: Whether to show class labels and confidence
+        mask_alpha: Transparency for mask overlay
+        box_thickness: Thickness of bounding box lines
+        font_scale: Font scale for text labels
+        
+    Returns:
+        Annotated image
+    """
+    # Create a copy of the original frame
+    annotated_frame = origin_frame.copy()
+    
+    # Generate random colors for each object
+    colors = {}
+    for obj_id in seg_info.keys():
+        colors[obj_id] = (
+            random.randint(0, 255),
+            random.randint(0, 255),
+            random.randint(0, 255)
+        )
+    
+    # Create colored mask overlay
+    if show_masks:
+        mask_overlay = np.zeros_like(origin_frame)
+        
+        # Color each object mask differently
+        for obj_id, info in seg_info.items():
+            # Extract individual object mask from merged mask
+            # Note: This assumes your mask values correspond to object IDs
+            object_mask = (refined_merged_mask == obj_id)
+            
+            if np.any(object_mask):
+                mask_overlay[object_mask] = colors[obj_id]
+        
+        # Blend with original image
+        annotated_frame = cv2.addWeighted(annotated_frame, 1 - mask_alpha, mask_overlay, mask_alpha, 0)
+    
+    # Draw bounding boxes and labels
+    if show_boxes or show_labels:
+        for obj_id, info in seg_info.items():
+            bbox = info['bbox']
+            class_name = info['class']
+            confidence = info['confidence']
+            color = colors[obj_id]
+            
+            # Convert bbox format (assuming it's [(x1,y1), (x2,y2)])
+            pt1 = tuple(map(int, bbox[0]))
+            pt2 = tuple(map(int, bbox[1]))
+            
+            # Draw bounding box
+            if show_boxes:
+                cv2.rectangle(annotated_frame, pt1, pt2, color, box_thickness)
+            
+            # Draw label
+            if show_labels:
+                label = f"{class_name}: {confidence:.2f}"
+                
+                # Get text size for background rectangle
+                (text_width, text_height), baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
+                )
+                
+                # Draw background rectangle for text
+                label_pt1 = (pt1[0], pt1[1] - text_height - baseline - 5)
+                label_pt2 = (pt1[0] + text_width + 5, pt1[1])
+                cv2.rectangle(annotated_frame, label_pt1, label_pt2, color, -1)
+                
+                # Draw text
+                text_pt = (pt1[0] + 2, pt1[1] - baseline - 2)
+                cv2.putText(annotated_frame, label, text_pt, 
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 1)
+    
+    return annotated_frame
+
+
+def display_results(
+    origin_frame: np.ndarray,
+    annotated_frame: np.ndarray,
+    refined_merged_mask: np.ndarray,
+    seg_info: Dict[int, Dict[str, any]],
+    figsize: Tuple[int, int] = (15, 5)
+) -> None:
+    """
+    Display original image, annotated image, and mask side by side
+    
+    Args:
+        origin_frame: Original input image
+        annotated_frame: Annotated image with boxes and masks
+        refined_merged_mask: Segmentation mask
+        seg_info: Detection information
+        figsize: Figure size for matplotlib
+    """
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    
+    # Original image
+    axes[0].imshow(cv2.cvtColor(origin_frame, cv2.COLOR_BGR2RGB))
+    axes[0].set_title('Original Image')
+    axes[0].axis('off')
+    
+    # Annotated image
+    axes[1].imshow(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB))
+    axes[1].set_title('Detection & Segmentation Results')
+    axes[1].axis('off')
+    
+    # Mask visualization
+    axes[2].imshow(refined_merged_mask, cmap='tab20')
+    axes[2].set_title('Segmentation Masks')
+    axes[2].axis('off')
+    
+    # Print detection summary
+    print(f"Detected {len(seg_info)} objects:")
+    for obj_id, info in seg_info.items():
+        print(f"  Object {obj_id}: {info['class']} (confidence: {info['confidence']:.3f})")
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def save_results(
+    annotated_frame: np.ndarray,
+    output_path: str,
+    quality: int = 95
+) -> None:
+    """
+    Save the annotated image to file
+    
+    Args:
+        annotated_frame: Annotated image to save
+        output_path: Path to save the image
+        quality: JPEG quality (0-100)
+    """
+    cv2.imwrite(output_path, annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    print(f"Annotated image saved to: {output_path}")
+
+
+# Example usage function
+def run_detection_and_visualize(detector_instance, origin_frame: np.ndarray, **kwargs) -> np.ndarray:
+    """
+    Complete pipeline: detect, segment, and visualize
+    
+    Args:
+        detector_instance: Your detector class instance
+        origin_frame: Input image
+        **kwargs: Additional arguments for detect_and_seg
+        
+    Returns:
+        Annotated frame
+    """
+    # Run detection and segmentation
+    refined_merged_mask, annotated_frame_shape, seg_info = detector_instance.detect_and_seg(
+        origin_frame, **kwargs
+    )
+    
+    # Create visualization
+    annotated_frame = visualize_detection_results(
+        origin_frame, 
+        refined_merged_mask, 
+        seg_info,
+        show_masks=True,
+        show_boxes=True,
+        show_labels=True
+    )
+    
+    # Display results
+    display_results(origin_frame, annotated_frame, refined_merged_mask, seg_info)
+    
+    return annotated_frame
+
+
+# Alternative: Individual object mask visualization
+def visualize_individual_masks(
+    origin_frame: np.ndarray,
+    refined_merged_mask: np.ndarray,
+    seg_info: Dict[int, Dict[str, any]],
+    max_cols: int = 4
+) -> None:
+    """
+    Display each object mask individually
+    
+    Args:
+        origin_frame: Original input image
+        refined_merged_mask: Merged segmentation mask
+        seg_info: Detection information
+        max_cols: Maximum columns in subplot grid
+    """
+    num_objects = len(seg_info)
+    if num_objects == 0:
+        print("No objects detected")
+        return
+    
+    cols = min(max_cols, num_objects + 1)  # +1 for original image
+    rows = (num_objects + cols) // cols
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
+    if rows == 1:
+        axes = axes.reshape(1, -1)
+    
+    # Show original image first
+    axes[0, 0].imshow(cv2.cvtColor(origin_frame, cv2.COLOR_BGR2RGB))
+    axes[0, 0].set_title('Original')
+    axes[0, 0].axis('off')
+    
+    # Show individual object masks
+    for idx, (obj_id, info) in enumerate(seg_info.items(), 1):
+        row = idx // cols
+        col = idx % cols
+        
+        # Extract individual mask
+        object_mask = (refined_merged_mask == obj_id)
+        
+        # Create colored overlay
+        mask_colored = np.zeros_like(origin_frame)
+        mask_colored[object_mask] = [0, 255, 0]  # Green mask
+        
+        # Blend with original
+        blended = cv2.addWeighted(origin_frame, 0.7, mask_colored, 0.3, 0)
+        
+        axes[row, col].imshow(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
+        axes[row, col].set_title(f"{info['class']}\n{info['confidence']:.3f}")
+        axes[row, col].axis('off')
+    
+    # Hide empty subplots
+    for idx in range(num_objects + 1, rows * cols):
+        row = idx // cols
+        col = idx % cols
+        axes[row, col].axis('off')
+    
+    plt.tight_layout()
+    plt.show()

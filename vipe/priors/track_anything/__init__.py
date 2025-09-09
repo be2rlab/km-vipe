@@ -121,3 +121,4 @@ class TrackAnythingPipeline:
         pred_phrase = {k: self.instance_phrase[k] for k in pred_mask_unique}
 
         return torch.from_numpy(pred_mask).cuda(), pred_phrase
+
