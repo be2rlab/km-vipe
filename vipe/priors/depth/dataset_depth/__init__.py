@@ -21,7 +21,9 @@ class Datasetdepth(DepthEstimationModel):
         if self.dataset == 'replica':
             depth_img_name = f"depth{src.index:06d}.png"
             depth_img_path = os.path.join(self.datasets_path, self.dataset, self.scene,'results',depth_img_name)
+            self.scale = 6553.5
         elif self.dataset == 'tum':
+            self.scale = 5000.0
             association_file_path = os.path.join(self.datasets_path,self.dataset,self.scene,'associations.txt')
             with open(association_file_path,'r') as f:
                 lines = f.readlines()
@@ -30,7 +32,7 @@ class Datasetdepth(DepthEstimationModel):
             depth_img_path = os.path.join(self.datasets_path,self.dataset,self.scene,depth_img_name)
         depth_img = cv2.imread(depth_img_path, cv2.IMREAD_UNCHANGED)
         to_tensor = T.ToTensor()
-        depth_tensor = to_tensor(depth_img)  # shape: (1, H, W), values in [0,1] if uint8
+        depth_tensor = to_tensor(depth_img) *self.scale # shape: (1, H, W), values in [0,1] if uint8
         # If it's 16-bit depth (common for datasets like TUM or KITTI),
         # ToTensor() will still scale to [0,1]. You probably want real depth values.
         depth_array = np.array(depth_img).astype("float32")  # keeps actual depth values
