@@ -32,23 +32,23 @@ class Datasetdepth(DepthEstimationModel):
             depth_img_path = os.path.join(self.datasets_path,self.dataset,self.scene,depth_img_name)
         depth_img = cv2.imread(depth_img_path, cv2.IMREAD_UNCHANGED)
         depth_img = depth_img /self.scale
-        (h1, w1), (crop_top, crop_bottom, crop_left, crop_right) = self._compute_frame_size_crop(depth_array.shape)
-        depth_array = np.array(
-            Image.fromarray(depth_array).resize((w1, h1), resample=Image.NEAREST),
+        (h1, w1), (crop_top, crop_bottom, crop_left, crop_right) = self._compute_frame_size_crop(depth_img.shape)
+        depth_img = np.array(
+            Image.fromarray(depth_img).resize((w1, h1), resample=Image.NEAREST),
             dtype=np.float32
         )
 
         # Crop
-        depth_array = depth_array[
+        depth_img = depth_img[
             crop_top : h1 - crop_bottom,
             crop_left : w1 - crop_right
         ]
-        depth_array = torch.from_numpy(depth_array)  # shape: (H, W)
-        depth_array = depth_array.unsqueeze(0)
+        depth_img = torch.from_numpy(depth_img)  # shape: (H, W)
+        depth_img = depth_img.unsqueeze(0)
 
         return DepthEstimationResult(
-            metric_depth = depth_array,
-            confidence = torch.ones_like(depth_array)
+            metric_depth = depth_img,
+            confidence = torch.ones_like(depth_img)
         )   
     
     def _compute_frame_size_crop(self, previous_frame_size: tuple[int, int]):
