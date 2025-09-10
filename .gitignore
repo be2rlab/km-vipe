@@ -174,3 +174,4 @@ JIAHUI.md
 .models_cache/*
 **.mp4
 weights/*
+**.txt
