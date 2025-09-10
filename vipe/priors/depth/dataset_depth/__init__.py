@@ -27,15 +27,11 @@ class Datasetdepth(DepthEstimationModel):
             association_file_path = os.path.join(self.datasets_path,self.dataset,self.scene,'associations.txt')
             with open(association_file_path,'r') as f:
                 lines = f.readlines()
-            depth_img_name = lines[src.index].split()[3]   # <-- split() handles multiple spaces
-            depth_img_name = depth_img_name.strip()        # <-- remove \n or whitespace
+            depth_img_name = lines[src.index].split()[3]
+            depth_img_name = depth_img_name.strip()        
             depth_img_path = os.path.join(self.datasets_path,self.dataset,self.scene,depth_img_name)
         depth_img = cv2.imread(depth_img_path, cv2.IMREAD_UNCHANGED)
-        to_tensor = T.ToTensor()
-        depth_img = to_tensor(depth_img) *self.scale # shape: (1, H, W), values in [0,1] if uint8
-        # If it's 16-bit depth (common for datasets like TUM or KITTI),
-        # ToTensor() will still scale to [0,1]. You probably want real depth values.
-        depth_array = np.array(depth_img).astype("float32")  # keeps actual depth values
+        depth_img = depth_img /self.scale
         (h1, w1), (crop_top, crop_bottom, crop_left, crop_right) = self._compute_frame_size_crop(depth_array.shape)
         depth_array = np.array(
             Image.fromarray(depth_array).resize((w1, h1), resample=Image.NEAREST),
