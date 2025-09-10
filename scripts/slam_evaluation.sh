@@ -29,7 +29,8 @@ do
         pipeline.output.save_artifacts=true \
         streams.base_path=$RESULTS_FOLDER/videos/$SCENE_NAME.mp4 \
         pipeline.output.path=$RESULTS_FOLDER \
-        dataset.sequence_name=$SCENE_NAME \
+        pipeline.slam.dataset.sequence_name=$SCENE_NAME \
+        pipeline.slam.keyframe_depth=dataset \
 
     python $ROOT_DIR/scripts/rmse_evaluation.py \
         --gt_folder "$GT_FOLDER" \
