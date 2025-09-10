@@ -18,7 +18,7 @@ class Datasetdepth(DepthEstimationModel):
         return DepthType.METRIC_DEPTH
     
     def estimate(self, src: DepthEstimationInput) -> DepthEstimationResult:
-        if self.dataset == 'replica':
+        if self.dataset == 'Replica':
             depth_img_name = f"depth{src.index:06d}.png"
             depth_img_path = os.path.join(self.datasets_path, self.dataset, self.scene,'results',depth_img_name)
             self.scale = 6553.5
@@ -33,11 +33,7 @@ class Datasetdepth(DepthEstimationModel):
         depth_img = cv2.imread(depth_img_path, cv2.IMREAD_UNCHANGED)
         depth_img = depth_img /self.scale
         (h1, w1), (crop_top, crop_bottom, crop_left, crop_right) = self._compute_frame_size_crop(depth_img.shape)
-        depth_img = np.array(
-            Image.fromarray(depth_img).resize((w1, h1), resample=Image.NEAREST),
-            dtype=np.float32
-        )
-
+        depth_img = cv2.resize(depth_img, (w1, h1), interpolation=cv2.INTER_NEAREST).astype(np.float32)
         # Crop
         depth_img = depth_img[
             crop_top : h1 - crop_bottom,
