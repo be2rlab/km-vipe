@@ -154,7 +154,7 @@ def build_sparse_tracks(config: DictConfig, n_views: int) -> SparseTracks:
         return CuVSLAMSparseTracks(n_views)
     
     if config.name == "lightglue":
-        from .lightglue import LightGlueTracks
+        from .lgtracker import LightGlueTracks
 
         return LightGlueTracks(n_views)
 
