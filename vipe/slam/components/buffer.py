@@ -729,16 +729,16 @@ class GraphBuffer:
                 pcd_xyz, pcd_rgb = current_map.get_dense_disp_pcd(di, v)
                 image = self.images[int(didx), v, :, 3::8, 3::8].moveaxis(0, -1).cpu().numpy()
 
-                rr.log(
-                    f"world/kf_{didx:04d}/v{v}",
-                    rr.Transform3D(translation=rig_mat[:3, 3], mat3x3=rig_mat[:3, :3]),
-                    rr.Pinhole(
-                        resolution=[dd_wd, dd_ht],
-                        image_from_camera=self.K_dense_disp[v],
-                        camera_xyz=rr.ViewCoordinates.RDF,
-                    ),
-                    rr.Image((image * 255).astype(np.uint8)).compress(),
-                )
+            #     rr.log(
+            #         f"world/kf_{didx:04d}/v{v}",
+            #         rr.Transform3D(translation=rig_mat[:3, 3], mat3x3=rig_mat[:3, :3]),
+            #         rr.Pinhole(
+            #             resolution=[dd_wd, dd_ht],
+            #             image_from_camera=self.K_dense_disp[v],
+            #             camera_xyz=rr.ViewCoordinates.RDF,
+            #         ),
+            #         rr.Image((image * 255).astype(np.uint8)).compress(),
+            #     )
                 rr.log(
                     f"world/kp_{didx:04d}/v{v}",
                     rr.Points3D(
