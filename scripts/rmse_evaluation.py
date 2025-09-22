@@ -18,7 +18,6 @@ def transform_to_evo_trajectory(data):
         if len(pose) >= 16:
                 matrix_vals = list(map(float, pose[:16]))
                 pose_matrix = np.array(matrix_vals).reshape(4, 4)
-                
                 tx, ty, tz = pose_matrix[:3, 3]
                 
                 rotation_matrix = pose_matrix[:3, :3]
@@ -35,13 +34,44 @@ def transform_to_evo_trajectory(data):
     )
 
 
-def load_gt_poses(gt_file):
+def load_gt_poses_replica(gt_file):
     poses = []
     with open(gt_file, 'r') as f:
         for line in f:
             poses.append(line.strip().split())
     
     return transform_to_evo_trajectory(poses)
+
+
+def load_gt_poses_tum(gt_file):
+    poses = []
+    with open(gt_file, 'r') as f:
+        for line in f:
+            if '#' not in line:
+                timestamp, tx, ty, tz, qx, qy, qz, qw = line.split()
+                rotation = R.from_quat([qx, qy, qz, qw])
+                rotation_matrix = rotation.as_matrix()
+                pose = np.eye(4)
+                pose[:3, :3] = rotation_matrix
+                pose[:3, 3] = [tx, ty, tz]
+                poses.append(pose.flatten())
+
+    return transform_to_evo_trajectory(poses)
+
+
+def load_gt_poses(args):
+    if args.dataset == "replica":
+        gt_file = os.path.join(args.gt_folder, args.scene_name, "traj.txt")
+        if not os.path.exists(gt_file):
+            raise FileNotFoundError(f"Ground truth file not found: {gt_file}")
+        return load_gt_poses_replica(gt_file)
+    if args.dataset == "tum":
+        gt_file = os.path.join(args.gt_folder, args.scene_name, "groundtruth.txt")
+        if not os.path.exists(gt_file):
+            raise FileNotFoundError(f"Ground truth file not found: {gt_file}")
+        return load_gt_poses_tum(gt_file)
+    else: 
+        raise Exception(f"{args.dataset} is not supported!") 
 
 
 def load_slam_poses(npz_file):
@@ -100,6 +130,7 @@ def write_to_csv(csv_file, scene_name, rmse):
 
 def main():
     parser = argparse.ArgumentParser(description='Compute RMSE ATE error')
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset (Replica, TUM, etc.)")
     parser.add_argument('--gt_folder', type=str, required=True, help='Path to ground truth folder')
     parser.add_argument('--results_folder', type=str, required=True, help='Path to results folder')
     parser.add_argument('--scene_name', type=str, required=True, help='Name of the scene')
@@ -109,16 +140,13 @@ def main():
     
     args = parser.parse_args()
     
-    gt_file = os.path.join(args.gt_folder, args.scene_name, "traj.txt")
     slam_file = os.path.join(args.results_folder, "pose", f"{args.scene_name}.npz")
     
-    if not os.path.exists(gt_file):
-        raise FileNotFoundError(f"Ground truth file not found: {gt_file}")
     if not os.path.exists(slam_file):
         raise FileNotFoundError(f"SLAM results file not found: {slam_file}")
     
     # print(f"Loading ground truth from: {gt_file}")
-    gt_traj = load_gt_poses(gt_file)
+    gt_traj = load_gt_poses(args)
     
     # print(f"Loading SLAM poses from: {slam_file}")
     slam_traj = load_slam_poses(slam_file)

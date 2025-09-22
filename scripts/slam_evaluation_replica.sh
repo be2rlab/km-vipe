@@ -19,6 +19,7 @@ do
     printf "Running scene:   %s\n" "$SCENE_NAME"
 
     python3 $ROOT_DIR/scripts/create_video.py \
+        --dataset "replica" \
         --scene_name=$SCENE_NAME \
         --input_dir=$GT_FOLDER \
         --output_dir=$RESULTS_FOLDER/videos/ \
@@ -33,6 +34,7 @@ do
         pipeline.slam.keyframe_depth=dataset \
 
     python $ROOT_DIR/scripts/rmse_evaluation.py \
+        --dataset "replica" \
         --gt_folder "$GT_FOLDER" \
         --results_folder "$RESULTS_FOLDER" \
         --scene_name "$SCENE_NAME" \
