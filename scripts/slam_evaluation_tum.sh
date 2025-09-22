@@ -25,14 +25,15 @@ do
     #     --input_dir=$GT_FOLDER \
     #     --output_dir=$RESULTS_FOLDER/videos/ \
 
-    # python3 $ROOT_DIR/run.py \
-    #     pipeline=tum \
-    #     streams=raw_mp4_stream \
-    #     pipeline.output.save_artifacts=true \
-    #     streams.base_path=$RESULTS_FOLDER/videos/$SCENE_NAME.mp4 \
-    #     pipeline.output.path=$RESULTS_FOLDER \
-    #     pipeline.slam.dataset.sequence_name=$SCENE_NAME \
-    #     pipeline.slam.keyframe_depth=dataset \
+    python3 $ROOT_DIR/run.py \
+        pipeline=tum \
+        streams=frame_dir_stream \
+        streams.base_path=$GT_FOLDER/$SCENE_NAME/rgb \
+        streams.scene_name=$SCENE_NAME \
+        pipeline.output.save_artifacts=true \
+        pipeline.output.path=$RESULTS_FOLDER \
+        # pipeline.slam.dataset.sequence_name=$SCENE_NAME \
+        # pipeline.slam.keyframe_depth=dataset \
 
     python $ROOT_DIR/scripts/rmse_evaluation.py \
         --dataset "tum" \
