@@ -9,7 +9,7 @@ services:
     ipc: host
     environment:
       - QT_X11_NO_MITSHM=1
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=all     # <-- only use cuda:1
       - NVIDIA_DRIVER_CAPABILITIES=all
       - DISPLAY=$DISPLAY
       - VGL_DISPLAY=${RENDER_DISPLAY:-":1"}
@@ -22,3 +22,11 @@ services:
     runtime: nvidia
     privileged: true
     command: bash
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '1']       # <-- pin to GPU 1
+              capabilities: [gpu]

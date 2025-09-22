@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -36,6 +37,37 @@ class SLAMMap:
 
     def scale(self, factor: float):
         self.dense_disp_xyz *= factor
+
+    def save(self, path: Path):
+        """
+        Save the SLAM map to a directory.
+        """
+        map_device = self.dense_disp_xyz.device
+        torch.save(
+            {
+                "dense_disp_xyz": self.dense_disp_xyz.cpu(),
+                "dense_disp_rgb": self.dense_disp_rgb.cpu(),
+                "dense_disp_packinfo": self.dense_disp_packinfo.cpu(),
+                "dense_disp_frame_inds": self.dense_disp_frame_inds,
+                "device": map_device,
+            },
+            path,
+        )
+
+    @staticmethod
+    def load(path: Path, device: torch.device | None = None):
+        """
+        Load the SLAM map from a directory.
+        """
+        data = torch.load(path)
+        if device is None:
+            device = data["device"]
+        return SLAMMap(
+            dense_disp_xyz=data["dense_disp_xyz"].to(device),
+            dense_disp_rgb=data["dense_disp_rgb"].to(device),
+            dense_disp_packinfo=data["dense_disp_packinfo"].to(device),
+            dense_disp_frame_inds=data["dense_disp_frame_inds"],
+        )
 
     @staticmethod
     def from_masked_dense_disp(xyz: torch.Tensor, rgb: torch.Tensor, mask: torch.Tensor, tstamps: torch.Tensor):
