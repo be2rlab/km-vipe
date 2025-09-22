@@ -320,7 +320,7 @@ class DepthCompletion(torch.nn.Module):
         x, y = batch_sparse[:, -2:].contiguous(), batch_complete[:, -2:].contiguous()
 
         # Use `vipe_ext` to find the K nearest neighbors.
-        import vipe_ext_jit as _C
+        import vipe_ext as _C
 
         _, inds = _C.utils_ext.nearest_neighbours(y, x, K)
         knn_indices = inds.view(-1, K)  # [M, K]

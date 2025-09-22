@@ -39,6 +39,9 @@ output:
   # Save artifacts and a info file
   save_artifacts: false
 
+  # Save reconstruction from SLAM
+  save_slam_map: false
+
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
   save_viz: true
   viz_downsample: 2

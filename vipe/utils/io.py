@@ -95,6 +95,10 @@ class ArtifactPath:
         return self.base_path / "vipe" / f"{self.artifact_name}_vis.mp4"
 
     @property
+    def slam_map_path(self) -> Path:
+        return self.base_path / "vipe" / f"{self.artifact_name}_slam_map.pt"
+
+    @property
     def essential_paths(self) -> list[Path]:
         return [
             self.rgb_path,

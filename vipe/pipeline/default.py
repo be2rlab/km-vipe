@@ -143,6 +143,10 @@ class DefaultAnnotationPipeline(Pipeline):
                     self.out_cfg.viz_attributes,
                 )
 
+            if self.out_cfg.save_slam_map and slam_output.slam_map is not None:
+                logger.info(f"Saving SLAM map to {artifact_path.slam_map_path}")
+                slam_output.slam_map.save(artifact_path.slam_map_path)
+
         if self.return_output_streams:
             annotate_output.output_streams = output_streams
 

@@ -281,8 +281,8 @@ class SLAMSystem:
                 self.backend.run_if_necessary(5, log=self.visualize)
 
         # Tracks can be determined earlier since it's fixed after frontend.
-        if self.visualize:
-            self.buffer.log_tracks()
+        # if self.visualize:
+        #     self.buffer.log_tracks()
 
         # Run the backend to perform a global BA over the keyframes.
         self.backend.run(7, log=self.visualize)

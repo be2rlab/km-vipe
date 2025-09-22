@@ -24,7 +24,7 @@ import torch
 from vipe.priors.depth import DepthEstimationInput, make_depth_model
 from vipe.priors.depth.alignment import align_inv_depth_to_depth
 from vipe.priors.depth.priorda import PriorDAModel
-from vipe.priors.depth.videodepthanything import VdieoDepthAnythingDepthModel
+from vipe.priors.depth.videodepthanything import VideoDepthAnythingDepthModel
 from vipe.priors.geocalib import GeoCalib
 from vipe.priors.track_anything import TrackAnythingPipeline
 from vipe.priors.embedding import EmbeddingsPipeline
@@ -133,8 +133,6 @@ class TrackAnythingProcessor(StreamProcessor):
 
     def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
         frame.instance, frame.instance_phrases = self.tracker.track(frame)
-        # print("track anything phrases:", frame.instance_phrases)
-        # print("-====-=-=-=-=-=-=-=-=--=-=-=-=")
         self.last_track_frame = frame.raw_frame_idx
 
         frame_instance_mask = frame.instance == 0
@@ -171,7 +169,7 @@ class AdaptiveDepthProcessor(StreamProcessor):
         try:
             prefix, metric_model, video_model = model.split("_")
             assert video_model in ["svda", "vda"]
-            self.video_depth_model = VdieoDepthAnythingDepthModel(model="vits" if video_model == "svda" else "vitl")
+            self.video_depth_model = VideoDepthAnythingDepthModel(model="vits" if video_model == "svda" else "vitl")
 
         except ValueError:
             prefix, metric_model = model.split("_")
