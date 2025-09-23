@@ -14,11 +14,13 @@ class LightGlueTracks(SparseTracks):
         self,
         n_views: int,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        visualization = False,
     ):
         super().__init__(n_views)
         self.device = device
         self.extractor = None
         self.matcher = None
+        self.visualization = visualization
 
         # tracker
         self.tracks = {}  # Stores all active tracks {track_id: track_data}
@@ -50,8 +52,9 @@ class LightGlueTracks(SparseTracks):
         curr_frame = frame_data_list[0] # len(frame_data_list) == 1
         curr_image = self._to_grayscale(curr_frame.rgb).unsqueeze(0) # [1, H, W] grayscale
         curr_feats = self.extractor.extract(curr_image)
-        # print(f"current global frame index: {current_frame.raw_frame_idx}")
+        
         if self.frame_idx == 0:
+            # Initialize tracks for the first frame
             kpts_curr = curr_feats['keypoints'].cpu().numpy()[0] # [N, 2]
             for i in range(len(kpts_curr)):
                 new_id = self.track_id_counter
@@ -62,83 +65,72 @@ class LightGlueTracks(SparseTracks):
                 # Record the observation for this frame
                 current_frame_observations[new_id] = kpts_curr[i]
                 self.track_id_counter += 1
+            print(f"Frame {self.frame_idx}: Initialized {len(kpts_curr)} tracks")
 
         else:
+            # Match current frame with previous frame
             matches = self.matcher({'image0': self.prev_feats, 'image1': curr_feats})
             
             # Use rbd to remove the batch dimension from the outputs
             all_kpts_prev, all_kpts_curr, matches01 = rbd(self.prev_feats), rbd(curr_feats), rbd(matches)
             all_kpts_prev = all_kpts_prev['keypoints']
             all_kpts_curr = all_kpts_curr['keypoints']
-            matches0 = matches01['matches'][..., 0]
-            matches1 = matches01['matches'][..., 1]
-            kpts_prev = all_kpts_prev[matches0]
-            kpts_curr = all_kpts_curr[matches1]
-            # print(f"Number of matches: {matches01['matches'].shape}")
-            # print(f"Number of keypoints in previous frame: {kpts_prev.shape}")
-            # print(f"Number of keypoints in current frame: {kpts_curr.shape}")
+            matches0 = matches01['matches'][..., 0]  # indices in prev frame
+            matches1 = matches01['matches'][..., 1]  # indices in curr frame
             
-            # Get the actual match indices and corresponding keypoints
-            kp_indices_prev = matches0
-            kp_indices_curr = matches1
-            # print(f"kp_indices_prev: {kp_indices_prev}")
-            # print(f"kp_indices_curr: {kp_indices_curr}")
-
-            # This will map the CURRENT frame's keypoint indices to track IDs
+            print(f"Frame {self.frame_idx}: Found {len(matches0)} matches between {len(all_kpts_prev)} and {len(all_kpts_curr)} keypoints")
+            
+            # This will map the current frame's keypoint indices to track IDs
             curr_kp_idx_to_track_id = {}
-
-            # Extend existing tracks
-            for matched_prev_kp_id, matched_curr_kp_id in zip(kp_indices_prev, kp_indices_curr): # loop over pairs of matched kps
-
-                if matched_prev_kp_id in self.prev_kp_idx_to_track_id:
-                    # retrive id in tracker
-                    track_id = self.prev_kp_idx_to_track_id[matched_prev_kp_id]
+            
+            # Process matched keypoints - extend existing tracks
+            for matched_prev_idx, matched_curr_idx in zip(matches0, matches1):
+                matched_prev_idx = int(matched_prev_idx.cpu().numpy())
+                matched_curr_idx = int(matched_curr_idx.cpu().numpy())
+                
+                if matched_prev_idx in self.prev_kp_idx_to_track_id:
+                    # This matched keypoint belongs to an existing track
+                    track_id = self.prev_kp_idx_to_track_id[matched_prev_idx]
                     
-                    # retrive current keypoint representation
-                    point = all_kpts_curr[matched_curr_kp_id].cpu().numpy()
+                    # Get the current keypoint position
+                    point = all_kpts_curr[matched_curr_idx].cpu().numpy()
                     
+                    # Update the track
                     self.tracks[track_id]['points'].append(point)
                     self.tracks[track_id]['last_seen'] = self.frame_idx
                     
-                    curr_kp_idx_to_track_id[matched_curr_kp_id] = track_id
-                    current_frame_observations[track_id] = point
-                if matched_prev_kp_id in self.prev_kp_idx_to_track_id:
-                    track_id = self.prev_kp_idx_to_track_id[matched_prev_kp_id]
+                    # Map current keypoint index to track ID for next frame
+                    curr_kp_idx_to_track_id[matched_curr_idx] = track_id
                     
-                    # Add the new point to the track
-                    point = all_kpts_curr[matched_curr_kp_id].cpu().numpy()
-                    self.tracks[track_id]['points'].append(point)
-                    self.tracks[track_id]['last_seen'] = self.frame_idx
-                    
-                    # Update the mapping for the next frame
-                    curr_kp_idx_to_track_id[matched_curr_kp_id] = track_id
-                    
-                    # Record the observation for this frame
+                    # Record observation for this frame
                     current_frame_observations[track_id] = point
 
             # Initialize new tracks for unmatched keypoints in the current frame
+            matched_curr_indices = set(int(idx.cpu().numpy()) for idx in matches1)
             all_curr_indices = set(range(len(all_kpts_curr)))
-            matched_curr_indices = set(kp_indices_curr.cpu().numpy())
             unmatched_curr_indices = all_curr_indices - matched_curr_indices
 
-            for idx in range(len(all_kpts_curr)):
-                if idx in unmatched_curr_indices:
-                    new_id = self.track_id_counter
-                    point = all_kpts_curr[idx].cpu().numpy()
+            print(f"Frame {self.frame_idx}: Creating {len(unmatched_curr_indices)} new tracks for unmatched keypoints")
+            
+            for idx in unmatched_curr_indices:
+                new_id = self.track_id_counter
+                point = all_kpts_curr[idx].cpu().numpy()
 
-                    self.tracks[new_id] = {'last_seen': self.frame_idx, 'points': [point]}
-                    curr_kp_idx_to_track_id[idx] = new_id
-                    
-                    current_frame_observations[new_id] = point
-                    self.track_id_counter += 1
+                # Create new track
+                self.tracks[new_id] = {'last_seen': self.frame_idx, 'points': [point]}
+                curr_kp_idx_to_track_id[idx] = new_id
+                current_frame_observations[new_id] = point
+                self.track_id_counter += 1
 
             # Prune old tracks
-            # A track is pruned if it hasn't been seen for a few frames
-            lost_thresh = 3 
+            lost_thresh = 10
             lost_ids = []
             for track_id, data in self.tracks.items():
                 if self.frame_idx - data['last_seen'] > lost_thresh:
                     lost_ids.append(track_id)
+            
+            if lost_ids:
+                print(f"Frame {self.frame_idx}: Pruning {len(lost_ids)} old tracks")
             
             for track_id in lost_ids:
                 del self.tracks[track_id]
@@ -146,15 +138,19 @@ class LightGlueTracks(SparseTracks):
             # Update the previous-to-current mapping for the next iteration
             self.prev_kp_idx_to_track_id = curr_kp_idx_to_track_id
 
-            prev_rgb = (self.prev_image.cpu().numpy() * 255).astype(np.uint8)
-            curr_rgb = (curr_frame.rgb.cpu().numpy() * 255).astype(np.uint8) 
-            m_kpts0 = kpts_prev.cpu().numpy()
-            m_kpts1 = kpts_curr.cpu().numpy()
+            # Visualization code
+            if self.visualization:
+                prev_rgb = (self.prev_image.cpu().numpy() * 255).astype(np.uint8)
+                curr_rgb = (curr_frame.rgb.cpu().numpy() * 255).astype(np.uint8) 
+                
+                # Get matched keypoints for visualization
+                kpts_prev = all_kpts_prev[matches0].cpu().numpy()
+                kpts_curr = all_kpts_curr[matches1].cpu().numpy()
 
-            viz2d.plot_images([prev_rgb, curr_rgb])
-            viz2d.plot_matches(m_kpts0, m_kpts1, color="lime", lw=0.2)
-            viz2d.save_plot(path = f"tracker_viz/matches_{self.frame_idx}.png")
-            matplotlib.pyplot.close()
+                viz2d.plot_images([prev_rgb, curr_rgb])
+                viz2d.plot_matches(kpts_prev, kpts_curr, color="lime", lw=0.2)
+                viz2d.save_plot(path = f"tracker_viz/matches_{self.frame_idx}.png")
+                matplotlib.pyplot.close()
 
         # Update state for the next frame
         self.prev_feats = curr_feats
@@ -162,6 +158,12 @@ class LightGlueTracks(SparseTracks):
         
         # Add the current frame's observations to the list
         self.observations[0].append(current_frame_observations)
+        
+        # Debug information
+        print(f"Frame {self.frame_idx}: {len(current_frame_observations)} observations")
+        print(f"Frame {self.frame_idx}: {len(self.tracks)} total active tracks")
+        # print(f"Frame {self.frame_idx}: Track IDs in current frame: {sorted(current_frame_observations.keys())}")
+        
         self.frame_idx += 1
 
 
