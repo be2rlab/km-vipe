@@ -149,7 +149,7 @@ def write_to_csv(csv_file, scene_name, rmse):
 
 def main():
     parser = argparse.ArgumentParser(description='Compute RMSE ATE error')
-    parser.add_argument("--dataset", type=str, required=True, help="Dataset (Replica, TUM, etc.)")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset (replica, TUM, etc.)")
     parser.add_argument('--gt_folder', type=str, required=True, help='Path to ground truth folder')
     parser.add_argument('--results_folder', type=str, required=True, help='Path to results folder')
     parser.add_argument('--scene_name', type=str, required=True, help='Name of the scene')
