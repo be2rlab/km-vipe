@@ -18,7 +18,7 @@ class Datasetdepth(DepthEstimationModel):
         return DepthType.METRIC_DEPTH
     
     def estimate(self, src: DepthEstimationInput) -> DepthEstimationResult:
-        if self.dataset == 'Replica':
+        if self.dataset == 'replica':
             depth_img_name = f"depth{src.index:06d}.png"
             depth_img_path = os.path.join(self.datasets_path, self.dataset, self.scene,'results',depth_img_name)
             self.scale = 6553.5

@@ -1,3 +1,3 @@
-dataset_name: Replica
+dataset_name: replica
 dataset_path: /data/
 sequence_name: room0
