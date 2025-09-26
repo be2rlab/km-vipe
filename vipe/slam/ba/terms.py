@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from einops import rearrange
 
@@ -241,6 +242,244 @@ class DenseDepthFlowTerm(SolverTerm):
             w=weight,
             r=rearrange(coords - self.target, "n hw c -> n (hw c)", c=2),
         )
+
+
+class EmbeddingSimilarityTerm(SolverTerm):
+    """Tightly couples pose and disparity updates with embedding similarity."""
+
+    def __init__(
+        self,
+        *,
+        pose_i_inds: torch.Tensor,
+        pose_j_inds: torch.Tensor,
+        rig_i_inds: torch.Tensor,
+        rig_j_inds: torch.Tensor,
+        dense_disp_i_inds: torch.Tensor,
+        dense_disp_j_inds: torch.Tensor,
+        embeddings: torch.Tensor,
+        weight: float,
+        image_size: tuple[int, int],
+        camera_type: CameraType,
+        embedding_valid_mask: torch.Tensor | None = None,
+        intrinsics: torch.Tensor | None = None,
+        intrinsics_factor: float = 8.0,
+        rig: SE3 | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.n_terms = pose_i_inds.shape[0]
+        assert pose_i_inds.shape == (self.n_terms,)
+        assert pose_j_inds.shape == (self.n_terms,)
+        assert rig_i_inds.shape == (self.n_terms,)
+        assert rig_j_inds.shape == (self.n_terms,)
+        assert dense_disp_i_inds.shape == (self.n_terms,)
+        assert dense_disp_j_inds.shape == (self.n_terms,)
+
+        self.pose_i_inds = pose_i_inds
+        self.pose_j_inds = pose_j_inds
+        self.rig_i_inds = rig_i_inds
+        self.rig_j_inds = rig_j_inds
+        self.dense_disp_i_inds = dense_disp_i_inds
+        self.dense_disp_j_inds = dense_disp_j_inds
+        self.camera_type = camera_type
+
+        self.embeddings = embeddings
+        self.embedding_valid_mask = embedding_valid_mask
+        self.embedding_weight = weight
+
+        self.image_size = image_size
+        self.height, self.width = image_size
+
+        assert embeddings.dim() == 4, "Embeddings must be flattened as (NV, C, H, W)"
+        assert (
+            embeddings.shape[2] == self.height and embeddings.shape[3] == self.width
+        ), "Embeddings resolution must match BA image size"
+        assert embedding_valid_mask is None or embedding_valid_mask.shape[1:] == image_size
+
+        self.intrinsics = intrinsics.reshape(-1, 4) if intrinsics is not None else None
+        self.intrinsics_factor = intrinsics_factor
+        self.rig = rig
+
+    def group_names(self) -> set[str]:
+        names = {"pose", "dense_disp"}
+        if self.intrinsics is None:
+            names.add("intrinsics")
+        if self.rig is None:
+            names.add("rig")
+        return names
+
+    def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn:
+        pose, dense_disp = variables["pose"], variables["dense_disp"]
+        if optimize_intrinsics := self.intrinsics is None:
+            intrinsics = variables["intrinsics"]
+        else:
+            intrinsics = self.intrinsics
+        if optimize_rig := self.rig is None:
+            rig = variables["rig"]
+        else:
+            rig = self.rig
+
+        assert isinstance(pose, SE3) and isinstance(dense_disp, torch.Tensor)
+        assert dense_disp.shape[1] == self.height * self.width
+        assert intrinsics.shape[0] == rig.shape[0]
+
+        camera_model_cls = self.camera_type.camera_model_cls()
+
+        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
+            pose,
+            dense_disp.view(-1, self.height, self.width),
+            None,
+            (camera_model_cls(intrinsics).scaled(1.0 / self.intrinsics_factor).intrinsics),
+            self.camera_type,
+            rig,
+            self.pose_i_inds,
+            self.pose_j_inds,
+            self.rig_i_inds,
+            self.rig_j_inds,
+            self.dense_disp_i_inds,
+            jacobian_p_d=jacobian,
+            jacobian_f=jacobian and optimize_intrinsics,
+            jacobian_r=jacobian and optimize_rig,
+        )
+
+        coords = coords.view(self.n_terms, self.height, self.width, 2)
+        valid = valid.view(self.n_terms, self.height, self.width, 1)
+
+        source_embeddings = self.embeddings[self.dense_disp_i_inds].float()
+        target_embeddings = self.embeddings[self.dense_disp_j_inds].float()
+
+        if self.embedding_valid_mask is not None:
+            src_valid = self.embedding_valid_mask[self.dense_disp_i_inds].unsqueeze(-1).to(valid.dtype)
+            tgt_valid = self.embedding_valid_mask[self.dense_disp_j_inds].unsqueeze(-1).to(valid.dtype)
+            valid = valid * src_valid * tgt_valid
+
+        valid_map = valid.permute(0, 3, 1, 2).float()
+
+        # Bilinear interpolation weights
+        u = coords[..., 0]
+        v = coords[..., 1]
+        u_clamped = u.clamp(0.0, self.width - 1.0)
+        v_clamped = v.clamp(0.0, self.height - 1.0)
+        x0 = torch.floor(u_clamped)
+        y0 = torch.floor(v_clamped)
+        x1 = torch.clamp(x0 + 1, max=self.width - 1)
+        y1 = torch.clamp(y0 + 1, max=self.height - 1)
+
+        du = (u_clamped - x0).unsqueeze(1)
+        dv = (v_clamped - y0).unsqueeze(1)
+        one_minus_du = 1.0 - du
+        one_minus_dv = 1.0 - dv
+
+        x0 = x0.long()
+        y0 = y0.long()
+        x1 = x1.long()
+        y1 = y1.long()
+
+        def gather(feat: torch.Tensor, yy: torch.Tensor, xx: torch.Tensor) -> torch.Tensor:
+            flat = feat.view(self.n_terms, feat.shape[1], -1)
+            idx = (yy * self.width + xx).view(self.n_terms, 1, -1)
+            gathered = torch.gather(flat, 2, idx.expand(-1, feat.shape[1], -1))
+            return gathered.view(self.n_terms, feat.shape[1], self.height, self.width)
+
+        F00 = gather(target_embeddings, y0, x0)
+        F10 = gather(target_embeddings, y0, x1)
+        F01 = gather(target_embeddings, y1, x0)
+        F11 = gather(target_embeddings, y1, x1)
+
+        target_samples = (
+            F00 * one_minus_du * one_minus_dv
+            + F10 * du * one_minus_dv
+            + F01 * one_minus_du * dv
+            + F11 * du * dv
+        )
+
+        target_samples = target_samples * valid_map
+
+        source_norm = F.normalize(source_embeddings, dim=1, eps=1e-6)
+        target_norm = F.normalize(target_samples, dim=1, eps=1e-6)
+        cos_sim = (source_norm * target_norm).sum(dim=1)
+
+        residual_map = (1.0 - cos_sim) * valid_map.squeeze(1)
+
+        norm_t = target_samples.norm(dim=1, keepdim=True).clamp(min=1e-6)
+        grad_t = -(source_norm - cos_sim.unsqueeze(1) * target_norm) / norm_t
+        grad_t = grad_t * valid_map
+
+        dT_du = (F10 - F00) * one_minus_dv + (F11 - F01) * dv
+        dT_dv = (F01 - F00) * one_minus_du + (F11 - F10) * du
+
+        grad_u = (grad_t * dT_du).sum(dim=1)
+        grad_v = (grad_t * dT_dv).sum(dim=1)
+        grad_u = grad_u * valid_map.squeeze(1)
+        grad_v = grad_v * valid_map.squeeze(1)
+
+        grad_coords = torch.stack([grad_u, grad_v], dim=-1)
+
+        residual = residual_map.view(self.n_terms, -1)
+        weight = (self.embedding_weight * valid_map.squeeze(1)).view(self.n_terms, -1)
+
+        J_dict = {}
+        if jacobian:
+            assert Ji is not None and Jj is not None and Jz is not None
+            grad_coords_flat = grad_coords.view(self.n_terms, -1, 2)
+
+            Ji_flat = Ji.view(self.n_terms, -1, 2, 6)
+            Jj_flat = Jj.view(self.n_terms, -1, 2, 6)
+            Jz_flat = Jz.view(self.n_terms, -1, 2, 1)
+
+            J_pose_i = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Ji_flat)
+            J_pose_j = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jj_flat)
+            J_disp = torch.einsum("nkd,nkdc->nkc", grad_coords_flat, Jz_flat)
+
+            term_inds = torch.arange(self.n_terms, device=pose.device)
+            J_dict = {
+                "pose": SparseDenseBlockMatrix(
+                    i_inds=torch.cat([term_inds, term_inds]),
+                    j_inds=torch.cat([self.pose_i_inds, self.pose_j_inds]),
+                    data=torch.cat([
+                        J_pose_i.view(self.n_terms, -1, 6),
+                        J_pose_j.view(self.n_terms, -1, 6),
+                    ], dim=0),
+                ),
+                "dense_disp": SparseMDiagonalBlockMatrix(
+                    i_inds=term_inds,
+                    j_inds=self.dense_disp_i_inds,
+                    data=J_disp.view(self.n_terms, -1, 1),
+                ),
+            }
+
+            if optimize_intrinsics:
+                assert Jfi is not None and Jfj is not None
+                Jfi_flat = Jfi.view(self.n_terms, -1, 2, Jfi.shape[-1])
+                Jfj_flat = Jfj.view(self.n_terms, -1, 2, Jfj.shape[-1])
+                J_intr = torch.cat([
+                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfi_flat),
+                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfj_flat),
+                ], dim=0)
+                J_dict["intrinsics"] = SparseDenseBlockMatrix(
+                    i_inds=torch.cat([term_inds, term_inds]),
+                    j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
+                    data=camera_model_cls.J_scale(
+                        1.0 / self.intrinsics_factor,
+                        J_intr,
+                    ),
+                )
+
+            if optimize_rig:
+                assert Jri is not None and Jrj is not None
+                Jri_flat = Jri.view(self.n_terms, -1, 2, 6)
+                Jrj_flat = Jrj.view(self.n_terms, -1, 2, 6)
+                J_rig = torch.cat([
+                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jri_flat),
+                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jrj_flat),
+                ], dim=0)
+                J_dict["rig"] = SparseDenseBlockMatrix(
+                    i_inds=torch.cat([term_inds, term_inds]),
+                    j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
+                    data=J_rig,
+                )
+
+        return ConcreteTermEvalReturn(J=J_dict, w=weight, r=residual)
 
 
 class DispSensRegularizationTerm(SolverTerm):

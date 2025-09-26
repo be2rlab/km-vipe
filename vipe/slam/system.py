@@ -18,6 +18,7 @@ import uuid
 import numpy as np
 import rerun as rr
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 
@@ -164,6 +165,18 @@ class SLAMSystem:
 
             if frame_data.pose is not None and phase == 1:
                 self.buffer.poses[kf_idx] = (SE3(self.buffer.rig[view_idx]) * frame_data.pose.inv()).data
+
+            if frame_data.features is not None:
+                features = frame_data.features.permute(2, 0, 1).to(self.device, dtype=torch.float32)
+                resized_features = F.interpolate(
+                    features.unsqueeze(0),
+                    size=(self.buffer.height // 8, self.buffer.width // 8),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(0)
+                self.buffer.set_embeddings(kf_idx, view_idx, resized_features)
+            else:
+                self.buffer.set_embeddings(kf_idx, view_idx, None)
 
         if phase == 1:
             self.buffer.update_disps_sens(self.metric_depth, frame_idx=kf_idx)

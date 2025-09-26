@@ -36,7 +36,7 @@ from vipe.utils.logging import pbar
 from vipe.utils.visualization import POINTS_STENCIL, draw_lines_batch, draw_points_batch
 
 from ..ba.solver import Solver, SparseBlockVector
-from ..ba.terms import DenseDepthFlowTerm, DispSensRegularizationTerm
+from ..ba.terms import DenseDepthFlowTerm, DispSensRegularizationTerm, EmbeddingSimilarityTerm
 from ..interface import SLAMMap
 from ..maths import geom
 from ..maths.retractor import DenseDispRetractor, IntrinsicsRetractor, PoseRetractor, RigRotationOnlyRetractor
@@ -63,6 +63,7 @@ class GraphBuffer:
         if cross_view_idx is None:
             cross_view_idx = [(i + 1) % n_views for i in range(n_views)]
 
+        self.buffer_size = buffer_size
         self.n_frames: int = 0
 
         self.height = height
@@ -135,6 +136,12 @@ class GraphBuffer:
             dtype=torch.bool,
         )
 
+        # Embeddings for semantic similarity
+        self.embeddings: torch.Tensor | None = None
+        self.embedding_valid_mask: torch.Tensor | None = None
+        self.embedding_dim: int | None = None
+        self.embedding_resolution: tuple[int, int] | None = None
+
         # Droid attributes
         # The updated operator will take the correlation volume of fmaps, the nets, and the inps,
         # and update the nets (hidden state) to a new one.
@@ -199,6 +206,56 @@ class GraphBuffer:
         return rearrange(self.inps, "n v c h w -> (n v) c h w")
 
     @property
+    def flattened_embeddings(self) -> torch.Tensor:
+        if self.embeddings is None:
+            raise RuntimeError("Embeddings have not been initialized")
+        return rearrange(self.embeddings, "n v c h w -> (n v) c h w")
+
+    @property
+    def flattened_embedding_valid_mask(self) -> torch.Tensor:
+        if self.embedding_valid_mask is None:
+            raise RuntimeError("Embedding validity mask has not been initialized")
+        return rearrange(self.embedding_valid_mask, "n v h w -> (n v) h w")
+
+    def _ensure_embedding_storage(self, embed_dim: int, height: int, width: int) -> None:
+        if self.embeddings is None:
+            self.embeddings = torch.zeros(
+                self.buffer_size,
+                self.n_views,
+                embed_dim,
+                height,
+                width,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.embedding_valid_mask = torch.zeros(
+                self.buffer_size,
+                self.n_views,
+                height,
+                width,
+                device=self.device,
+                dtype=torch.bool,
+            )
+            self.embedding_dim = embed_dim
+            self.embedding_resolution = (height, width)
+        else:
+            assert self.embedding_dim == embed_dim
+            assert self.embedding_resolution == (height, width)
+
+    def set_embeddings(self, frame_idx: int, view_idx: int, embeddings: torch.Tensor | None) -> None:
+        if embeddings is None:
+            if self.embedding_valid_mask is not None:
+                self.embedding_valid_mask[frame_idx, view_idx] = False
+            return
+
+        embed_dim = embeddings.shape[0]
+        height, width = embeddings.shape[1:]
+        self._ensure_embedding_storage(embed_dim, height, width)
+        assert self.embeddings is not None and self.embedding_valid_mask is not None
+        self.embeddings[frame_idx, view_idx] = embeddings.to(self.device, dtype=torch.float32)
+        self.embedding_valid_mask[frame_idx, view_idx] = True
+
+    @property
     def K(self) -> np.ndarray:
         intr_np = self.camera_type.build_camera_model(self.intrinsics).pinhole().intrinsics.cpu().numpy()
         k_mat = np.eye(3)[None].repeat(self.n_views, axis=0)
@@ -226,6 +283,9 @@ class GraphBuffer:
         self.nets[ix] = self.nets[ix + 1]
         self.inps[ix] = self.inps[ix + 1]
         self.fmaps[ix] = self.fmaps[ix + 1]
+        if self.embeddings is not None and self.embedding_valid_mask is not None:
+            self.embeddings[ix] = self.embeddings[ix + 1]
+            self.embedding_valid_mask[ix] = self.embedding_valid_mask[ix + 1]
         self.masks[ix] = self.masks[ix + 1]
         self.cross_view_idx[ix] = self.cross_view_idx[ix + 1]
         self.n_frames -= 1
@@ -419,6 +479,30 @@ class GraphBuffer:
                 camera_type=self.camera_type,
             )
         )
+
+        embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
+        if self.embeddings is not None and embedding_weight > 0.0:
+            embedding_valid = (
+                self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
+            )
+            solver.add_term(
+                EmbeddingSimilarityTerm(
+                    pose_i_inds=pi,
+                    pose_j_inds=pj,
+                    rig_i_inds=qi,
+                    rig_j_inds=qj,
+                    dense_disp_i_inds=di,
+                    dense_disp_j_inds=dj,
+                    embeddings=self.flattened_embeddings,
+                    embedding_valid_mask=embedding_valid,
+                    weight=embedding_weight,
+                    intrinsics=None,
+                    intrinsics_factor=8.0,
+                    rig=None,
+                    image_size=(self.height // 8, self.width // 8),
+                    camera_type=self.camera_type,
+                )
+            )
 
         if self.sparse_tracks.enabled:
             # This does not support cross-view tracking yet.
