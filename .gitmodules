@@ -4,3 +4,6 @@
 [submodule "LightGlue"]
 	path = LightGlue
 	url = https://github.com/cvg/LightGlue.git
+[submodule "pycuvslam"]
+	path = pycuvslam
+	url = https://github.com/NVlabs/PyCuVSLAM.git

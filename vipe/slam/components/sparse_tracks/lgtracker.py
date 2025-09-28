@@ -173,7 +173,8 @@ class LightGlueTracks(SparseTracks):
                 )
                 self.tracks[new_id] = track
                 self.active_track_ids.append(new_id)
-                current_frame_observations[new_id] = kpts_curr[idx].cpu().numpy()
+                # Not add new points to observations
+                # current_frame_observations[new_id] = kpts_curr[idx].cpu().numpy()
                 self.track_id_counter += 1
 
             print(f"Frame {self.frame_idx}: Extended {len(matched_curr_indices)} tracks, "
@@ -199,6 +200,7 @@ class LightGlueTracks(SparseTracks):
         # Add the current frame's observations to the main list
         self.observations[0].append(current_frame_observations)
         
+        print(f"Frame {self.frame_idx}: {len(current_frame_observations)} observations")
         print(f"Frame {self.frame_idx}: {len(self.active_track_ids)} total active tracks")
         
         self.frame_idx += 1
@@ -284,7 +286,7 @@ class LightGlueTracks(SparseTracks):
                 H, mask = cv2.findHomography(
                     pts_prev,
                     pts_curr,
-                    cv2.RANSAC,
+                    cv2.USAC_MAGSAC,
                     float(self.ransac_threshold),
                     None,
                     int(self.ransac_max_iters),
@@ -295,7 +297,7 @@ class LightGlueTracks(SparseTracks):
                 H, mask = cv2.findHomography(
                     pts_prev,
                     pts_curr,
-                    cv2.RANSAC,
+                    cv2.USAC_MAGSAC,
                     float(self.ransac_threshold),
                 )
 

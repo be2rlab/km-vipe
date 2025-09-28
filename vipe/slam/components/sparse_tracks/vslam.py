@@ -15,7 +15,7 @@
 
 import numpy as np
 import torch
-import vslam
+import cuvslam as vslam
 
 from vipe.streams.base import VideoFrame
 from vipe.utils.misc import unpack_optional
@@ -43,7 +43,7 @@ class CuVSLAMSparseTracks(SparseTracks):
 
             cam = vslam.Camera()
             cam.distortion = vslam.Distortion()
-            cam.distortion.model = vslam.DistortionModel.Pinhole
+            cam.distortion.model = vslam.Distortion.Model.Pinhole
             cam.focal = [float(fx), float(fy)]
             cam.principal = [float(cx), float(cy)]
             cam.size = [int(frame_width), int(frame_height)]
@@ -56,10 +56,10 @@ class CuVSLAMSparseTracks(SparseTracks):
         rig.cameras = vslam_cameras
         rig.imus = []
 
-        cfg = vslam.TrackerConfig()
-        cfg.odometry_mode = vslam.TrackerOdometryMode.Mono
-        cfg.enable_observations_export = True
-        tracker = vslam.Tracker(rig, cfg)
+        # cfg = vslam.TrackerConfig()
+        # cfg.odometry_mode = vslam.TrackerOdometryMode.Mono
+        # cfg.enable_observations_export = True
+        tracker = vslam.Tracker(rig)
 
         self.tracker = tracker
         self.frame_idx = 0
@@ -89,4 +89,5 @@ class CuVSLAMSparseTracks(SparseTracks):
             # cuvslam will automatically prune observations being masked.
             for obs in self.tracker.get_last_observations(camera_idx):
                 observation[self.frame_idx][obs.id] = np.array([obs.u, obs.v])
+        print(f"{len(self.observations[0][self.frame_idx])} observations at frame {self.frame_idx}")
         self.frame_idx += 1

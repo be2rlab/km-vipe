@@ -74,6 +74,8 @@ class SparseTracks(ABC):
         image_size: tuple[int, int],
         dense_disp_size: tuple[int, int],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # pairs = list(zip(source_frame_inds.cpu().numpy().tolist(), target_frame_inds.cpu().numpy().tolist()))
+        # print(f"compute_dense_disp_target_weight called with {len(pairs)} pairs: {pairs}")
         n_terms = len(source_view_inds)
         disp_h, disp_w = dense_disp_size
         uv_factor = torch.tensor(
@@ -149,7 +151,7 @@ def build_sparse_tracks(config: DictConfig, n_views: int) -> SparseTracks:
         return DummySparseTracks(n_views)
 
     if config.name == "cuvslam":
-        from .cuvslam import CuVSLAMSparseTracks
+        from .vslam import CuVSLAMSparseTracks
 
         return CuVSLAMSparseTracks(n_views)
     
