@@ -34,6 +34,7 @@ from vipe.streams.base import (
 )
 from vipe.utils import io
 from vipe.utils.cameras import CameraType
+from vipe.utils.profiler import profile_function, profiler_section
 from vipe.utils.visualization import save_projection_video
 
 from . import AnnotationPipelineOutput, Pipeline
@@ -54,6 +55,7 @@ class DefaultAnnotationPipeline(Pipeline):
         self.out_path.mkdir(exist_ok=True, parents=True)
         self.camera_type = CameraType(self.init_cfg.camera_type)
 
+    @profile_function()
     def _add_init_processors(self, video_stream: VideoStream) -> ProcessedVideoStream:
         init_processors: list[StreamProcessor] = []
 
@@ -76,6 +78,7 @@ class DefaultAnnotationPipeline(Pipeline):
         # init_processors.append(EmbeddingsProcessor())
         return ProcessedVideoStream(video_stream, init_processors)
 
+    @profile_function()
     def _add_post_processors(
         self, view_idx: int, video_stream: VideoStream, slam_output: SLAMOutput
     ) -> ProcessedVideoStream:
@@ -91,6 +94,7 @@ class DefaultAnnotationPipeline(Pipeline):
             post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
         return ProcessedVideoStream(video_stream, post_processors)
 
+    @profile_function()
     def run(self, video_data: VideoStream | MultiviewVideoList) -> AnnotationPipelineOutput:
         if isinstance(video_data, MultiviewVideoList):
             video_streams = [video_data[view_idx] for view_idx in range(len(video_data))]
@@ -109,43 +113,49 @@ class DefaultAnnotationPipeline(Pipeline):
             logger.info(f"{video_data.name()} has been proccessed already, skip it!!")
             return annotate_output
 
-        slam_streams: list[VideoStream] = [
-            self._add_init_processors(video_stream).cache("process", online=True) for video_stream in video_streams
-        ]
+        with profiler_section("pipeline.init_processors"):
+            slam_streams: list[VideoStream] = [
+                self._add_init_processors(video_stream).cache("process", online=True) for video_stream in video_streams
+            ]
 
-        slam_pipeline = SLAMSystem(device=torch.device("cuda"), config=self.slam_cfg)
-        slam_output = slam_pipeline.run(slam_streams, rig=slam_rig, camera_type=self.camera_type)
+        with profiler_section("pipeline.slam"):
+            slam_pipeline = SLAMSystem(device=torch.device("cuda"), config=self.slam_cfg)
+            slam_output = slam_pipeline.run(slam_streams, rig=slam_rig, camera_type=self.camera_type)
 
         if self.return_payload:
             annotate_output.payload = slam_output
             return annotate_output
 
-        output_streams = [
-            self._add_post_processors(view_idx, slam_stream, slam_output).cache("depth", online=True)
-            for view_idx, slam_stream in enumerate(slam_streams)
-        ]
+        with profiler_section("pipeline.post_processors"):
+            output_streams = [
+                self._add_post_processors(view_idx, slam_stream, slam_output).cache("depth", online=True)
+                for view_idx, slam_stream in enumerate(slam_streams)
+            ]
 
         # Dumping artifacts for all views in the streams
         for output_stream, artifact_path in zip(output_streams, artifact_paths):
             artifact_path.meta_info_path.parent.mkdir(exist_ok=True, parents=True)
             if self.out_cfg.save_artifacts:
-                logger.info(f"Saving artifacts to {artifact_path}")
-                io.save_artifacts(artifact_path, output_stream)
-                with artifact_path.meta_info_path.open("wb") as f:
-                    pickle.dump({"ba_residual": slam_output.ba_residual}, f)
+                with profiler_section("pipeline.save_artifacts"):
+                    logger.info(f"Saving artifacts to {artifact_path}")
+                    io.save_artifacts(artifact_path, output_stream)
+                    with artifact_path.meta_info_path.open("wb") as f:
+                        pickle.dump({"ba_residual": slam_output.ba_residual}, f)
 
             if self.out_cfg.save_viz:
-                save_projection_video(
-                    artifact_path.meta_vis_path,
-                    output_stream,
-                    slam_output,
-                    self.out_cfg.viz_downsample,
-                    self.out_cfg.viz_attributes,
-                )
+                with profiler_section("pipeline.save_visualizations"):
+                    save_projection_video(
+                        artifact_path.meta_vis_path,
+                        output_stream,
+                        slam_output,
+                        self.out_cfg.viz_downsample,
+                        self.out_cfg.viz_attributes,
+                    )
 
             if self.out_cfg.save_slam_map and slam_output.slam_map is not None:
-                logger.info(f"Saving SLAM map to {artifact_path.slam_map_path}")
-                slam_output.slam_map.save(artifact_path.slam_map_path)
+                with profiler_section("pipeline.save_slam_map"):
+                    logger.info(f"Saving SLAM map to {artifact_path.slam_map_path}")
+                    slam_output.slam_map.save(artifact_path.slam_map_path)
 
         if self.return_output_streams:
             annotate_output.output_streams = output_streams
