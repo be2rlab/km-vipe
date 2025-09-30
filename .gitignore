@@ -175,3 +175,5 @@ JIAHUI.md
 .models_cache/*
 **.mp4
 weights/
+tracker_viz/
+comparison_results/
