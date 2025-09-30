@@ -27,6 +27,7 @@ from vipe.priors.depth.base import DepthType
 from vipe.streams.base import FrameAttribute, ProcessedVideoStream, StreamProcessor, VideoFrame, VideoStream
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
+from vipe.utils.profiler import profile_function, profiler_section
 from vipe.utils.misc import unpack_optional
 
 from .components.backend import SLAMBackend
@@ -89,6 +90,7 @@ class SLAMSystem:
         if isinstance(cfg, dict):
             return cfg.get(key, default)
         return getattr(cfg, key, default)
+    @profile_function()
     def _build_components(self):
         self.droid_net = DroidNet().to(self.device)
         self.sparse_tracks = build_sparse_tracks(self.config.sparse_tracks, self.config.n_views)
@@ -135,6 +137,7 @@ class SLAMSystem:
 
         self.backend.depth_model = self.metric_depth
 
+    @profile_function()
     def _add_keyframe(
         self,
         frame_idx: int,
@@ -169,6 +172,7 @@ class SLAMSystem:
             self.buffer.update_disps_sens(self.metric_depth, frame_idx=kf_idx)
         self.buffer.n_frames += 1
 
+    @profile_function()
     def _log_final(self, video_streams: list[VideoStream], filled_return: FilledReturn):
         trajectory = filled_return.poses.inv()
         for frame_idx, frame_data_list in enumerate(zip(*video_streams)):
@@ -187,6 +191,7 @@ class SLAMSystem:
                     rr.Image((image * 255).astype(np.uint8)).compress(),
                 )
 
+    @profile_function()
     def _precompute_features(self, frame_data_list: list[VideoFrame]):
         images_list = []
         masks_list = []
@@ -212,6 +217,7 @@ class SLAMSystem:
         return images, masks
 
     @torch.no_grad()
+    @profile_function()
     def run(
         self,
         video_streams: list[VideoStream],
@@ -219,86 +225,97 @@ class SLAMSystem:
         camera_type: CameraType = CameraType.PINHOLE,
     ) -> SLAMOutput:
         assert len(video_streams) > 0
-        resizers = [StandardResizeStreamProcessor() for _ in video_streams]
-        video_streams = [
-            ProcessedVideoStream(video_stream, [resizer]) for video_stream, resizer in zip(video_streams, resizers)
-        ]
+        with profiler_section("slam.prepare_streams"):
+            resizers = [StandardResizeStreamProcessor() for _ in video_streams]
+            video_streams = [
+                ProcessedVideoStream(video_stream, [resizer]) for video_stream, resizer in zip(video_streams, resizers)
+            ]
 
-        frame_size = video_streams[0].frame_size()
-        total_n_frames = len(video_streams[0])
-        for vs in video_streams:
-            assert vs.frame_size() == frame_size
-            assert len(vs) == total_n_frames
+            frame_size = video_streams[0].frame_size()
+            total_n_frames = len(video_streams[0])
+            for vs in video_streams:
+                assert vs.frame_size() == frame_size
+                assert len(vs) == total_n_frames
 
-        if rig is None:
-            assert len(video_streams) == 1, "Need rig for multiple views"
-            rig = SE3.Identity(1)
-        self.rig = rig
+            if rig is None:
+                assert len(video_streams) == 1, "Need rig for multiple views"
+                rig = SE3.Identity(1)
+            self.rig = rig
 
-        self.config.update(
-            {
-                "height": frame_size[0],
-                "width": frame_size[1],
-                "n_views": len(video_streams),
-                "has_init_pose": FrameAttribute.POSE in video_streams[0].attributes(),
-                "camera_type": camera_type,
-            }
-        )
+            self.config.update(
+                {
+                    "height": frame_size[0],
+                    "width": frame_size[1],
+                    "n_views": len(video_streams),
+                    "has_init_pose": FrameAttribute.POSE in video_streams[0].attributes(),
+                    "camera_type": camera_type,
+                }
+            )
 
         self._build_components()
 
         if self.visualize:
-            rr.init("ViPE Visualization", spawn=True, recording_id=uuid.uuid4())
-            rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+            with profiler_section("slam.visualization.init"):
+                rr.init("ViPE Visualization", spawn=True, recording_id=uuid.uuid4())
+                rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         # Run frontend to get attributes initialization. This will also populate attribute buffers.
         frame_data_list: list[VideoFrame]
         frame_idx: int = 0
-        for frame_idx, frame_data_list in pbar(
-            enumerate(zip(*video_streams)), desc="SLAM Pass (1/2)", total=total_n_frames
-        ):
-            
-            images, buffer_masks = self._precompute_features(frame_data_list)
-            
-            self.sparse_tracks.track_image(frame_data_list)
-            
-            if self.motion_filter.check(images, buffer_masks) or frame_idx == total_n_frames - 1:
-                is_keyframe = True
-                self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=1)
-            else:
-                is_keyframe = False
-            
-            self.frontend.run()
-            
+        with profiler_section("slam.frontend_pass"):
+            for frame_idx, frame_data_list in pbar(
+                enumerate(zip(*video_streams)), desc="SLAM Pass (1/2)", total=total_n_frames
+            ):
+                with profiler_section("slam.frontend.iteration"):
+                    images, buffer_masks = self._precompute_features(frame_data_list)
 
-            if self.visualize:
-                self.buffer.log(self.config.map_filter_thresh)
-                self.frontend.graph.log()
+                    with profiler_section("slam.sparse_tracks"):
+                        self.sparse_tracks.track_image(frame_data_list)
 
-            # Run the backend in between to correct intrinsics and extrinsics in advance
-            # to avoid large errors and local minima.
-            if self.buffer.n_frames in self.config.frontend_backend_iters and is_keyframe:
-                self.backend.run_if_necessary(5, log=self.visualize)
+                    if self.motion_filter.check(images, buffer_masks) or frame_idx == total_n_frames - 1:
+                        is_keyframe = True
+                        self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=1)
+                    else:
+                        is_keyframe = False
+
+                    with profiler_section("slam.frontend.run"):
+                        self.frontend.run()
+
+                    if self.visualize:
+                        with profiler_section("slam.visualization.iteration"):
+                            self.buffer.log(self.config.map_filter_thresh)
+                            self.frontend.graph.log()
+
+                    # Run the backend in between to correct intrinsics and extrinsics in advance
+                    # to avoid large errors and local minima.
+                    if self.buffer.n_frames in self.config.frontend_backend_iters and is_keyframe:
+                        with profiler_section("slam.backend.intermediate"):
+                            self.backend.run_if_necessary(5, log=self.visualize)
 
         # Tracks can be determined earlier since it's fixed after frontend.
         # if self.visualize:
         #     self.buffer.log_tracks()
 
         # Run the backend to perform a global BA over the keyframes.
-        self.backend.run(7, log=self.visualize)
+        with profiler_section("slam.backend.global"):
+            self.backend.run(7, log=self.visualize)
 
         # Run backend again with a new graph and cleared GRU states.
-        self.backend.run(self.config.backend_iters, update_depth=False, log=self.visualize)
+        with profiler_section("slam.backend.refine"):
+            self.backend.run(self.config.backend_iters, update_depth=False, log=self.visualize)
 
         # Infill poses and attributes for non-keyframe frames.
         self.inner_filler.set_start_idx(self.buffer.n_frames)
-        for frame_idx, frame_data_list in pbar(
-            enumerate(zip(*video_streams)), desc="SLAM Pass (2/2)", total=total_n_frames
-        ):
-            images, buffer_masks = self._precompute_features(frame_data_list)
-            self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=2)
-            if self.inner_filler.check() or frame_idx == total_n_frames - 1:
-                self.inner_filler.compute()
+        with profiler_section("slam.infill"):
+            for frame_idx, frame_data_list in pbar(
+                enumerate(zip(*video_streams)), desc="SLAM Pass (2/2)", total=total_n_frames
+            ):
+                with profiler_section("slam.infill.iteration"):
+                    images, buffer_masks = self._precompute_features(frame_data_list)
+                    self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=2)
+                    if self.inner_filler.check() or frame_idx == total_n_frames - 1:
+                        with profiler_section("slam.inner.compute"):
+                            self.inner_filler.compute()
 
         filled_return = self.inner_filler.get_result()
 
@@ -308,14 +325,17 @@ class SLAMSystem:
             raise ValueError("Your video might be malformed. Try using streams.cached=true in the config.")
 
         if self.visualize:
-            self._log_final(video_streams, filled_return)
+            with profiler_section("slam.visualization.final"):
+                self._log_final(video_streams, filled_return)
 
-        slam_map = self.buffer.extract_slam_map(filter_thresh=self.config.map_filter_thresh)
+        with profiler_section("slam.extract_map"):
+            slam_map = self.buffer.extract_slam_map(filter_thresh=self.config.map_filter_thresh)
 
         # Scale back the intrinsics to the original size.
-        original_intrinsics = torch.stack(
-            [resizer.recover_intrinsics(self.buffer.intrinsics[v]) for v, resizer in enumerate(resizers)]
-        )
+        with profiler_section("slam.recover_intrinsics"):
+            original_intrinsics = torch.stack(
+                [resizer.recover_intrinsics(self.buffer.intrinsics[v]) for v, resizer in enumerate(resizers)]
+            )
 
         return SLAMOutput(
             trajectory=filled_return.poses.inv(),

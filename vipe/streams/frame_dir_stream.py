@@ -107,7 +107,7 @@ class FrameDirStream(VideoStream):
 
 
 class FrameDirStreamList(StreamList):
-    def __init__(self, base_path: str, frame_start: int, frame_end: int, frame_skip: int, cached: bool = False) -> None:
+    def __init__(self, base_path: str, frame_start: int, frame_end: int, frame_skip: int, cached: bool = False, scene_name: str = None) -> None:
         super().__init__()
         base_path_obj = Path(base_path)
         
@@ -126,12 +126,13 @@ class FrameDirStreamList(StreamList):
             
         self.frame_range = range(frame_start, frame_end, frame_skip)
         self.cached = cached
+        self.scene_name = scene_name
 
     def __len__(self) -> int:
         return len(self.frame_directories)
 
     def __getitem__(self, index: int) -> VideoStream:
-        stream: VideoStream = FrameDirStream(self.frame_directories[index], seek_range=self.frame_range)
+        stream: VideoStream = FrameDirStream(self.frame_directories[index], seek_range=self.frame_range, name=self.scene_name)
         if self.cached:
             stream = ProcessedVideoStream(stream, []).cache(desc="Loading frames", online=False)
         return stream

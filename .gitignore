@@ -50,7 +50,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-
+residuals_fr3_w_xyz_no_filtering/
 # Translations
 *.mo
 *.pot
@@ -177,3 +177,6 @@ JIAHUI.md
 weights/
 tracker_viz/
 comparison_results/
+weights/*
+**.txt
+tum_results
