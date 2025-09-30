@@ -12,6 +12,8 @@ import huggingface_hub
 import torch.nn.functional as F
 import torch.onnx
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from vipe.priors.depth.unidepth.models.unidepthv2.unidepthv2 import UniDepthV2
 
 
@@ -124,7 +126,7 @@ if __name__ == "__main__":
         help="Input shape. No dyamic shape supported!",
     )
     parser.add_argument(
-        "--output-path", type=str, default="unidepthv2.onnx", help="Output ONNX file"
+        "--output-path", type=str, default="weights/unidepthv2.onnx", help="Output ONNX file"
     )
     parser.add_argument(
         "--with-camera",
