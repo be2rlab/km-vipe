@@ -60,7 +60,7 @@ def load_gt_poses_tum(gt_file):
 
 
 def load_gt_poses(args):
-    if args.dataset == "replica":
+    if args.dataset == "replica" or args.dataset == "aria":
         gt_file = os.path.join(args.gt_folder, args.scene_name, "traj.txt")
         if not os.path.exists(gt_file):
             raise FileNotFoundError(f"Ground truth file not found: {gt_file}")

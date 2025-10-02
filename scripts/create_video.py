@@ -17,7 +17,7 @@ def read_images_tum(args):
 
 
 def read_images(args):
-    if args.dataset == "replica":
+    if args.dataset == "replica" or args.dataset == 'aria':
         return read_images_replica(args)
     if args.dataset == "tum":
         return read_images_tum(args)
