@@ -1,5 +1,5 @@
 defaults:
-  - /slam: default
+  - /slam: tum
 
 instance: vipe.pipeline.default.DefaultAnnotationPipeline
 
@@ -22,7 +22,7 @@ init:
     add_sky: true
 
 slam:
-  keyframe_depth: unidepth-l
+  keyframe_depth: dataset
   optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
   visualize: true
 
@@ -38,9 +38,6 @@ output:
 
   # Save artifacts and a info file
   save_artifacts: false
-
-  # Save reconstruction from SLAM
-  save_slam_map: false
 
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
   save_viz: true

@@ -37,7 +37,7 @@ from vipe.utils.cameras import CameraType
 from vipe.utils.visualization import save_projection_video
 
 from . import AnnotationPipelineOutput, Pipeline
-from .processors import AdaptiveDepthProcessor, GeoCalibIntrinsicsProcessor, TrackAnythingProcessor
+from .processors import AdaptiveDepthProcessor, GeoCalibIntrinsicsProcessor, TrackAnythingProcessor, EmbeddingsProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ class DefaultAnnotationPipeline(Pipeline):
                     sam_run_gap=int(video_stream.fps() * self.init_cfg.instance.kf_gap_sec),
                 )
             )
+        # init_processors.append(EmbeddingsProcessor())
         return ProcessedVideoStream(video_stream, init_processors)
 
     def _add_post_processors(
@@ -141,6 +142,10 @@ class DefaultAnnotationPipeline(Pipeline):
                     self.out_cfg.viz_downsample,
                     self.out_cfg.viz_attributes,
                 )
+
+            if self.out_cfg.save_slam_map and slam_output.slam_map is not None:
+                logger.info(f"Saving SLAM map to {artifact_path.slam_map_path}")
+                slam_output.slam_map.save(artifact_path.slam_map_path)
 
         if self.return_output_streams:
             annotate_output.output_streams = output_streams
