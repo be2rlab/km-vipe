@@ -151,10 +151,10 @@ class LightGlueTracks(SparseTracks):
             m_kpts0 = kpts_prev.cpu().numpy()
             m_kpts1 = kpts_curr.cpu().numpy()
 
-            # viz2d.plot_images([prev_rgb, curr_rgb])
-            # viz2d.plot_matches(m_kpts0, m_kpts1, color="lime", lw=0.2)
-            # viz2d.save_plot(path = f"tracker_viz/matches_{self.frame_idx}.png")
-            # matplotlib.pyplot.close()
+            viz2d.plot_images([prev_rgb, curr_rgb])
+            viz2d.plot_matches(m_kpts0, m_kpts1, color="lime", lw=0.2)
+            viz2d.save_plot(path = f"tracker_viz/matches_{self.frame_idx}.png")
+            matplotlib.pyplot.close()
 
         # Update state for the next frame
         self.prev_feats = curr_feats
@@ -163,7 +163,6 @@ class LightGlueTracks(SparseTracks):
         # Add the current frame's observations to the list
         self.observations[0].append(current_frame_observations)
         self.frame_idx += 1
-        print(self.observations)
 
 
     

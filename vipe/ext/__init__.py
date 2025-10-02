@@ -21,7 +21,7 @@ from vipe.ext.specs import get_cpp_flags, get_cuda_flags, get_sources
 
 
 try:
-    import vipe_ext_jit as _C
+    import vipe_ext as _C
 
     vipe_ext_not_found = False
 except ImportError:

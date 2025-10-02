@@ -41,6 +41,8 @@ class FrameAttribute(Enum):
     INSTANCE = "instance"
     MASK = "mask"
     METRIC_DEPTH = "metric_depth"
+    FEATURES = "features"
+    FEATURES_PATCH_SIZE = "features_patch_size"
 
 
 @dataclass(kw_only=True, slots=True)
@@ -59,6 +61,8 @@ class VideoFrame:
     - mask: Binary mask of the frame. The shape is (H, W), with 0 for invalid pixels.
     - metric_depth: The depth map of the frame. The shape is (H, W). Value is in metric scale.
     - information: Additional information about the frame
+    - features: The features of the frame. The shape is (H/patch_size, W/patch_size, C).
+    - features_patch_size: The patch size of the features.
     """
 
     SKY_PROMPT = "sky"
@@ -73,6 +77,8 @@ class VideoFrame:
     mask: torch.Tensor | None = None
     metric_depth: torch.Tensor | None = None
     information: str = ""
+    features: torch.Tensor | None = None
+    features_patch_size: int | None = None
 
     def size(self) -> tuple[int, int]:
         return (self.rgb.shape[0], self.rgb.shape[1])
@@ -95,6 +101,10 @@ class VideoFrame:
             attributes.add(FrameAttribute.MASK)
         if self.metric_depth is not None:
             attributes.add(FrameAttribute.METRIC_DEPTH)
+        if self.features is not None:
+            attributes.add(FrameAttribute.FEATURES)
+        if self.features_patch_size is not None:
+            attributes.add(FrameAttribute.FEATURES_PATCH_SIZE)
 
         return attributes
 
@@ -111,6 +121,10 @@ class VideoFrame:
             return self.mask
         if attribute == FrameAttribute.METRIC_DEPTH:
             return self.metric_depth
+        if attribute == FrameAttribute.FEATURES:
+            return self.features
+        if attribute == FrameAttribute.FEATURES_PATCH_SIZE:
+            return self.features_patch_size
         raise ValueError(f"Attribute {attribute} is not available in the frame.")
 
     def set_attribute(self, attribute: FrameAttribute, value: Any) -> None:
@@ -126,6 +140,10 @@ class VideoFrame:
             self.mask = value
         elif attribute == FrameAttribute.METRIC_DEPTH:
             self.metric_depth = value
+        elif attribute == FrameAttribute.FEATURES:
+            self.features = value
+        elif attribute == FrameAttribute.FEATURES_PATCH_SIZE:
+            self.features_patch_size = value
         else:
             raise ValueError(f"Attribute {attribute} is not available in the frame.")
 
@@ -143,6 +161,8 @@ class VideoFrame:
             intrinsics=map_cpu(self.intrinsics),
             camera_type=self.camera_type,
             information=self.information,
+            features=map_cpu(self.features),
+            features_patch_size=self.features_patch_size,
         )
 
     def cuda(self) -> "VideoFrame":
@@ -159,6 +179,8 @@ class VideoFrame:
             intrinsics=map_cuda(self.intrinsics),
             camera_type=self.camera_type,
             information=self.information,
+            features=map_cuda(self.features),
+            features_patch_size=self.features_patch_size,
         )
 
     def resize(self, size: tuple[int, int]) -> "VideoFrame":
@@ -198,6 +220,22 @@ class VideoFrame:
         # Distortion coefficients are usually w.r.t normalized coordinates so no need to change here.
         new_camera_type = self.camera_type
 
+        # Handle features resizing
+        new_features = None
+        new_features_patch_size = self.features_patch_size
+        if self.features is not None and self.features_patch_size is not None:
+            # Calculate new feature map size based on new image size and patch size
+            new_feat_h = h1 // self.features_patch_size
+            new_feat_w = w1 // self.features_patch_size
+            new_feat_size = (new_feat_h, new_feat_w)
+            
+            # Resize features using bilinear interpolation
+            # features shape: (H/patch_size, W/patch_size, C) -> (C, H/patch_size, W/patch_size)
+            feat_for_interp = self.features.permute(2, 0, 1)[None]  # (1, C, H_feat, W_feat)
+            new_features = torch.nn.functional.interpolate(
+                feat_for_interp, new_feat_size, mode="bilinear"
+            ).squeeze(0).permute(1, 2, 0)  # Back to (H_feat_new, W_feat_new, C)
+
         return VideoFrame(
             raw_frame_idx=self.raw_frame_idx,
             rgb=new_rgb,
@@ -209,6 +247,8 @@ class VideoFrame:
             intrinsics=new_intrinsics,
             camera_type=new_camera_type,
             information=self.information,
+            features=new_features,
+            features_patch_size=new_features_patch_size,
         )
 
     def crop(self, top: int, bottom: int, left: int, right: int) -> "VideoFrame":
@@ -240,6 +280,25 @@ class VideoFrame:
 
         new_camera_type = self.camera_type
 
+        # Handle features cropping
+        new_features = None
+        new_features_patch_size = self.features_patch_size
+        if self.features is not None and self.features_patch_size is not None:
+            # Convert pixel coordinates to feature map coordinates
+            feat_top = top // self.features_patch_size
+            feat_bottom = bottom // self.features_patch_size
+            feat_left = left // self.features_patch_size
+            feat_right = right // self.features_patch_size
+            
+            # Ensure we don't go out of bounds
+            feat_h, feat_w = self.features.shape[:2]
+            feat_top = max(0, feat_top)
+            feat_left = max(0, feat_left)
+            feat_bottom = min(feat_h, feat_bottom)
+            feat_right = min(feat_w, feat_right)
+            
+            new_features = self.features[feat_top:feat_bottom, feat_left:feat_right]
+
         return VideoFrame(
             raw_frame_idx=self.raw_frame_idx,
             rgb=new_rgb,
@@ -251,6 +310,8 @@ class VideoFrame:
             intrinsics=new_intrinsics,
             camera_type=new_camera_type,
             information=self.information,
+            features=new_features,
+            features_patch_size=new_features_patch_size,
         )
 
     @property

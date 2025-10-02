@@ -51,4 +51,4 @@ ba:
   dense_disp_alpha: 0.001
 
 sparse_tracks:
-  name: lightglue
+  name: dummy

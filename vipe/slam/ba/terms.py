@@ -28,8 +28,7 @@ from ..maths import geom
 from ..maths.matrix import SparseBlockMatrix, SparseDenseBlockMatrix, SparseMDiagonalBlockMatrix
 from ..maths.vector import SparseBlockVector
 from .kernel import RobustKernel
-import cv2
-import numpy as np
+
 
 class TermEvalReturn(ABC):
     @abstractmethod
@@ -236,21 +235,7 @@ class DenseDepthFlowTerm(SolverTerm):
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
-        r = rearrange(coords - self.target, "n (h w) c -> n h w c", h=self.image_size[0], w=self.image_size[1])
-        all_min, all_max = float("inf"), float("-inf")
-        for i, image in enumerate(r):
-            residual_norm = torch.norm(image, dim=-1)
-            val_min, val_max = residual_norm.min().item(), residual_norm.max().item()
-            all_min = min(all_min, val_min)
-            all_max = max(all_max, val_max)
-        # Pass 2: save images with fixed scaling
-        for i, image in enumerate(r):
-            residual_norm = torch.norm(image, dim=-1).cpu().numpy()
-            img = (residual_norm - all_min) / (all_max - all_min + 1e-8)
-            img = (img * 255).astype(np.uint8)
-            scale = 16
-            img = np.kron(img, np.ones((scale, scale), dtype=np.uint8))
-            # cv2.imwrite(f"/home/human/zaid/km-vipe/residuals/residual_{self.pose_i_inds[i]}_{self.pose_j_inds[i]}.png", img)
+
         return ConcreteTermEvalReturn(
             J=J_dict,
             w=weight,

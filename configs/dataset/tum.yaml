@@ -1,3 +1,0 @@
-dataset_name: tum
-dataset_path: /data
-sequence_name: rgbd_dataset_freiburg1_desk
