@@ -30,7 +30,6 @@ from ..maths.matrix import SparseBlockMatrix, SparseDenseBlockMatrix, SparseMDia
 from ..maths.vector import SparseBlockVector
 from .kernel import RobustKernel
 
-
 class TermEvalReturn(ABC):
     @abstractmethod
     def jtwj(self, group_name_row: str, group_name_col: str) -> SparseBlockMatrix: ...
@@ -236,7 +235,6 @@ class DenseDepthFlowTerm(SolverTerm):
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
-
         return ConcreteTermEvalReturn(
             J=J_dict,
             w=weight,
