@@ -34,8 +34,8 @@ RUN pip install scikit-learn
 RUN pip install ftfy regex tqdm
 RUN pip install "numpy<2" "opencv-python<5" --force-reinstall
 
-RUN pip install torch-tensorrt
-RUN pip install git+https://github.com/NVIDIA-AI-IOT/torch2trt.git
+RUN pip install torch-tensorrt --no-deps
+RUN pip install git+https://github.com/NVIDIA-AI-IOT/torch2trt.git --no-deps
 
 WORKDIR /home/${USER}/km-vipe
 

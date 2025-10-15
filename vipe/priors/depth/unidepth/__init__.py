@@ -21,6 +21,10 @@ from vipe.utils.misc import unpack_optional
 
 from ..base import DepthEstimationInput, DepthEstimationModel, DepthEstimationResult, DepthType
 from .models.unidepthv2.unidepthv2 import Pinhole, UniDepthV2
+from .utils.preprocess import UniDepthPreprocessor, postprocess
+
+from torch2trt import TRTModule
+import tensorrt as trt
 
 
 class UniDepth2Model(DepthEstimationModel):
@@ -67,3 +71,48 @@ class UniDepth2Model(DepthEstimationModel):
             metric_depth=pred_depth,
             confidence=confidence,
         )
+
+class UnidepthTRTModel(DepthEstimationModel):
+    def __init__(self, engine_path = "/home/user/km-vipe/weights/unidepthv2-672-1190.engine", target_size = (672, 1190)):
+        print(f"Attempting to load TRT model from {engine_path}")
+        self.engine_path = engine_path
+        with open(self.engine_path, "rb") as f:
+            engine_bytes = f.read()
+        
+        engine = trt.Runtime(trt.Logger()).deserialize_cuda_engine(engine_bytes)
+        model = TRTModule(
+            engine=engine,
+            input_names=["rgbs"],
+            output_names=["pts_3d", "confidence", "intrinsics"],
+        )
+        self.model = model
+        self.target_size = target_size
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.preprocessor = UniDepthPreprocessor(target_size, device=self.device)
+
+    @property
+    def depth_type(self) -> DepthType:
+        return DepthType.MODEL_METRIC_DEPTH
+
+    def estimate(self, src: DepthEstimationInput) -> DepthEstimationResult:
+        rgb: torch.Tensor = unpack_optional(src.rgb)
+
+        preprocessed, scale_info = self.preprocessor.preprocess_tensor(rgb)
+        rgb = torch.clamp(rgb.moveaxis(-1, 1) * 255.0, max=255.0).byte()
+
+        with torch.no_grad():
+            pts_3d, confidence, intrinsics = self.model(preprocessed)
+
+        pred_depth, confidence, _ = postprocess(pts_3d, scale_info), postprocess(confidence, scale_info), intrinsics
+
+        pred_depth = pred_depth[:, -1:]
+
+        pred_depth = pred_depth.squeeze(1)
+        confidence = confidence.squeeze(1)
+
+        return DepthEstimationResult(
+            metric_depth=pred_depth,
+            confidence=confidence
+        )
+    
+
