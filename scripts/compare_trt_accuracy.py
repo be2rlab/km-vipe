@@ -11,6 +11,13 @@ from typing import Tuple, Dict, Any
 
 from image_preprocessing import UniDepthPreprocessor, postprocess_depth
 
+import os
+import sys
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
 from torch2trt import TRTModule
 import tensorrt as trt
 
@@ -19,9 +26,9 @@ class ModelComparison:
     """Compare TensorRT and PyTorch UniDepth models"""
     
     def __init__(self, 
-                 engine_path: str = "unidepthv2-672-1190.engine",
+                 engine_path: str = "/weights/unidepthv2-l-672-1190.engine",
                  image_path: str = "frame000000.jpg",
-                 target_size: Tuple[int, int] = (672, 1190)):
+                 target_size: Tuple[int, int] = (336, 602)):
         
         self.engine_path = engine_path
         self.image_path = image_path
@@ -61,7 +68,7 @@ class ModelComparison:
         
         from vipe.priors.depth.unidepth.models.unidepthv2.unidepthv2 import UniDepthV2
 
-        model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitb14").eval().cuda()
+        model = UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitl14").eval().cuda()
 
         print("✅ PyTorch model loaded")
         return model
@@ -81,6 +88,8 @@ class ModelComparison:
     def run_trt_inference(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run TensorRT inference"""
         print("Running TensorRT inference...")
+
+        print(self.preprocessed_image)
         
         with torch.no_grad():
             pts_3d, confidence, intrinsics = self.trt_model(self.preprocessed_image)
@@ -125,12 +134,6 @@ class ModelComparison:
         torch_pts3d, torch_conf, torch_intrinsics = torch_outputs
         
         metrics = {}
-        
-        # 3D Points comparison
-        pts3d_diff = torch.abs(trt_pts3d - torch_pts3d)
-        metrics['pts3d_mae'] = pts3d_diff.mean().item()
-        metrics['pts3d_max_error'] = pts3d_diff.max().item()
-        metrics['pts3d_mse'] = torch.nn.functional.mse_loss(trt_pts3d, torch_pts3d).item()
         
         # Depth comparison (Z component)
         trt_depth = trt_pts3d[:, 2:3, :, :]  # Z component
@@ -198,28 +201,6 @@ class ModelComparison:
         axes[0, 3].set_title('Depth Difference (Abs)')
         axes[0, 3].axis('off')
         plt.colorbar(im3, ax=axes[0, 3], fraction=0.046, pad=0.04)
-        
-        # Row 2: Confidence maps
-        # axes[1, 0].axis('off')  # Empty
-        
-        # TensorRT confidence
-        # im4 = axes[1, 1].imshow(trt_conf_np, cmap='plasma')
-        # axes[1, 1].set_title('TensorRT Confidence')
-        # axes[1, 1].axis('off')
-        # plt.colorbar(im4, ax=axes[1, 1], fraction=0.046, pad=0.04)
-        
-        # PyTorch confidence
-        # im5 = axes[1, 2].imshow(torch_conf_np, cmap='plasma')
-        # axes[1, 2].set_title('PyTorch Confidence')
-        # axes[1, 2].axis('off')
-        # plt.colorbar(im5, ax=axes[1, 2], fraction=0.046, pad=0.04)
-        
-        # Confidence difference
-        # conf_diff = np.abs(trt_conf_np - torch_conf_np)
-        # im6 = axes[1, 3].imshow(conf_diff, cmap='hot')
-        # axes[1, 3].set_title('Confidence Difference (Abs)')
-        # axes[1, 3].axis('off')
-        # plt.colorbar(im6, ax=axes[1, 3], fraction=0.046, pad=0.04)
         
         # Row 3: 3D Points (X, Y components and histogram)
         trt_x = trt_pts3d[0, 0].cpu().numpy()
@@ -302,10 +283,6 @@ class ModelComparison:
         # Print metrics
         print("\n📊 COMPARISON METRICS:")
         print("-" * 40)
-        print(f"3D Points MAE:        {metrics['pts3d_mae']:.6f}")
-        print(f"3D Points Max Error:  {metrics['pts3d_max_error']:.6f}")
-        print(f"3D Points MSE:        {metrics['pts3d_mse']:.6f}")
-        print("-" * 40)
         print(f"Depth MAE:            {metrics['depth_mae']:.6f}")
         print(f"Depth Max Error:      {metrics['depth_max_error']:.6f}")
         print(f"Depth MSE:            {metrics['depth_mse']:.6f}")
@@ -351,7 +328,7 @@ def main():
     """Main comparison function"""
     
     # Configure paths
-    engine_path = "unidepthv2-672-1190.engine" 
+    engine_path = "weights/unidepthv2-336-602.engine" 
     image_path = "frame000000.jpg"        
     
     # Check if files exist
@@ -370,7 +347,7 @@ def main():
         comparator = ModelComparison(
             engine_path=engine_path,
             image_path=image_path,
-            target_size=(672, 1190)
+            target_size=(336, 602)
         )
         
         metrics = comparator.run_comparison(save_dir="comparison_results")

@@ -2,7 +2,7 @@
 
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/Replica
-export RESULTS_FOLDER=$ROOT_DIR/vipe_results
+export RESULTS_FOLDER=$ROOT_DIR/unidepth-trt
 export SCENE_NAMES=(
     room0
     room1

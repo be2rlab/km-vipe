@@ -180,3 +180,5 @@ comparison_results/
 weights/*
 **.txt
 tum_results
+unidepth-torch
+unidepth-trt 
