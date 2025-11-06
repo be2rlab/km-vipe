@@ -30,6 +30,7 @@ from ..maths.matrix import SparseBlockMatrix, SparseDenseBlockMatrix, SparseMDia
 from ..maths.vector import SparseBlockVector
 from .kernel import RobustKernel
 
+
 class TermEvalReturn(ABC):
     @abstractmethod
     def jtwj(self, group_name_row: str, group_name_col: str) -> SparseBlockMatrix: ...
@@ -262,6 +263,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
         intrinsics: torch.Tensor | None = None,
         intrinsics_factor: float = 8.0,
         rig: SE3 | None = None,
+        chunk_size: int = 4,  # Process in chunks to save memory
     ) -> None:
         super().__init__()
 
@@ -284,14 +286,15 @@ class EmbeddingSimilarityTerm(SolverTerm):
         self.embeddings = embeddings
         self.embedding_valid_mask = embedding_valid_mask
         self.embedding_weight = weight
+        self.chunk_size = chunk_size
 
         self.image_size = image_size
         self.height, self.width = image_size
 
         assert embeddings.dim() == 4, "Embeddings must be flattened as (NV, C, H, W)"
-        assert (
-            embeddings.shape[2] == self.height and embeddings.shape[3] == self.width
-        ), "Embeddings resolution must match BA image size"
+        assert embeddings.shape[2] == self.height and embeddings.shape[3] == self.width, (
+            "Embeddings resolution must match BA image size"
+        )
         assert embedding_valid_mask is None or embedding_valid_mask.shape[1:] == image_size
 
         self.intrinsics = intrinsics.reshape(-1, 4) if intrinsics is not None else None
@@ -305,6 +308,78 @@ class EmbeddingSimilarityTerm(SolverTerm):
         if self.rig is None:
             names.add("rig")
         return names
+
+    @staticmethod
+    def bilinear_sample_with_grad(
+        features: torch.Tensor, coords: torch.Tensor, return_grad: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """
+        Memory-efficient bilinear sampling with gradients.
+
+        Args:
+            features: (N, C, H, W)
+            coords: (N, H, W, 2) in (x, y) format
+            return_grad: whether to compute gradients
+
+        Returns:
+            samples: (N, C, H, W)
+            grad_u: (N, C, H, W) if return_grad else None
+            grad_v: (N, C, H, W) if return_grad else None
+        """
+        N, C, H, W = features.shape
+
+        u = coords[..., 0]
+        v = coords[..., 1]
+
+        # Clamp coordinates
+        u_clamped = u.clamp(0.0, W - 1.0)
+        v_clamped = v.clamp(0.0, H - 1.0)
+
+        # Floor coordinates
+        x0 = torch.floor(u_clamped).long()
+        y0 = torch.floor(v_clamped).long()
+        x1 = torch.clamp(x0 + 1, max=W - 1)
+        y1 = torch.clamp(y0 + 1, max=H - 1)
+
+        # Interpolation weights
+        du = u_clamped - x0.float()
+        dv = v_clamped - y0.float()
+
+        # Reshape for gathering
+        flat_features = features.view(N, C, -1)
+
+        # Compute linear indices
+        idx_00 = (y0 * W + x0).view(N, 1, -1).expand(-1, C, -1)
+        idx_10 = (y0 * W + x1).view(N, 1, -1).expand(-1, C, -1)
+        idx_01 = (y1 * W + x0).view(N, 1, -1).expand(-1, C, -1)
+        idx_11 = (y1 * W + x1).view(N, 1, -1).expand(-1, C, -1)
+
+        # Gather values (done in one go to reuse memory)
+        F00 = torch.gather(flat_features, 2, idx_00).view(N, C, H, W)
+        F10 = torch.gather(flat_features, 2, idx_10).view(N, C, H, W)
+        F01 = torch.gather(flat_features, 2, idx_01).view(N, C, H, W)
+        F11 = torch.gather(flat_features, 2, idx_11).view(N, C, H, W)
+
+        # Expand weights for broadcasting
+        du = du.unsqueeze(1)  # (N, 1, H, W)
+        dv = dv.unsqueeze(1)
+
+        # Bilinear interpolation
+        w00 = (1 - du) * (1 - dv)
+        w10 = du * (1 - dv)
+        w01 = (1 - du) * dv
+        w11 = du * dv
+
+        samples = F00 * w00 + F10 * w10 + F01 * w01 + F11 * w11
+
+        if not return_grad:
+            return samples, None, None
+
+        # Gradients with respect to u and v
+        grad_u = (F10 - F00) * (1 - dv) + (F11 - F01) * dv
+        grad_v = (F01 - F00) * (1 - du) + (F11 - F10) * du
+
+        return samples, grad_u, grad_v
 
     def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn:
         pose, dense_disp = variables["pose"], variables["dense_disp"]
@@ -343,101 +418,134 @@ class EmbeddingSimilarityTerm(SolverTerm):
         coords = coords.view(self.n_terms, self.height, self.width, 2)
         valid = valid.view(self.n_terms, self.height, self.width, 1)
 
-        source_embeddings = self.embeddings[self.dense_disp_i_inds].float()
-        target_embeddings = self.embeddings[self.dense_disp_j_inds].float()
+        # Process in chunks to avoid OOM
+        residual_chunks = []
+        weight_chunks = []
+        if jacobian:
+            J_pose_i_chunks = []
+            J_pose_j_chunks = []
+            J_disp_chunks = []
+            if optimize_intrinsics:
+                J_intr_chunks = []
+            if optimize_rig:
+                J_rig_chunks = []
 
-        if self.embedding_valid_mask is not None:
-            src_valid = self.embedding_valid_mask[self.dense_disp_i_inds].unsqueeze(-1).to(valid.dtype)
-            tgt_valid = self.embedding_valid_mask[self.dense_disp_j_inds].unsqueeze(-1).to(valid.dtype)
-            valid = valid * src_valid * tgt_valid
+        for chunk_start in range(0, self.n_terms, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, self.n_terms)
+            chunk_slice = slice(chunk_start, chunk_end)
 
-        valid_map = valid.permute(0, 3, 1, 2).float()
+            # Get chunk data
+            src_idx = self.dense_disp_i_inds[chunk_slice]
+            tgt_idx = self.dense_disp_j_inds[chunk_slice]
 
-        # Bilinear interpolation weights
-        u = coords[..., 0]
-        v = coords[..., 1]
-        u_clamped = u.clamp(0.0, self.width - 1.0)
-        v_clamped = v.clamp(0.0, self.height - 1.0)
-        x0 = torch.floor(u_clamped)
-        y0 = torch.floor(v_clamped)
-        x1 = torch.clamp(x0 + 1, max=self.width - 1)
-        y1 = torch.clamp(y0 + 1, max=self.height - 1)
+            # Keep embeddings in original dtype (likely float16)
+            source_embeddings = self.embeddings[src_idx]
+            target_embeddings = self.embeddings[tgt_idx]
 
-        du = (u_clamped - x0).unsqueeze(1)
-        dv = (v_clamped - y0).unsqueeze(1)
-        one_minus_du = 1.0 - du
-        one_minus_dv = 1.0 - dv
+            coords_chunk = coords[chunk_slice]
+            valid_chunk = valid[chunk_slice]
 
-        x0 = x0.long()
-        y0 = y0.long()
-        x1 = x1.long()
-        y1 = y1.long()
+            # Apply embedding valid mask
+            if self.embedding_valid_mask is not None:
+                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1).to(valid_chunk.dtype)
+                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1).to(valid_chunk.dtype)
+                valid_chunk = valid_chunk * src_valid * tgt_valid
 
-        def gather(feat: torch.Tensor, yy: torch.Tensor, xx: torch.Tensor) -> torch.Tensor:
-            flat = feat.view(self.n_terms, feat.shape[1], -1)
-            idx = (yy * self.width + xx).view(self.n_terms, 1, -1)
-            gathered = torch.gather(flat, 2, idx.expand(-1, feat.shape[1], -1))
-            return gathered.view(self.n_terms, feat.shape[1], self.height, self.width)
+            valid_map = valid_chunk.permute(0, 3, 1, 2)
 
-        F00 = gather(target_embeddings, y0, x0)
-        F10 = gather(target_embeddings, y0, x1)
-        F01 = gather(target_embeddings, y1, x0)
-        F11 = gather(target_embeddings, y1, x1)
+            # Bilinear sampling with gradients
+            target_samples, grad_u, grad_v = self.bilinear_sample_with_grad(
+                target_embeddings, coords_chunk, return_grad=jacobian
+            )
 
-        target_samples = (
-            F00 * one_minus_du * one_minus_dv
-            + F10 * du * one_minus_dv
-            + F01 * one_minus_du * dv
-            + F11 * du * dv
-        )
+            # Apply valid mask
+            target_samples = target_samples * valid_map
 
-        target_samples = target_samples * valid_map
+            # Normalize embeddings (work in float32 for numerical stability)
+            source_norm = F.normalize(source_embeddings.float(), dim=1, eps=1e-6)
+            target_norm = F.normalize(target_samples.float(), dim=1, eps=1e-6)
 
-        source_norm = F.normalize(source_embeddings, dim=1, eps=1e-6)
-        target_norm = F.normalize(target_samples, dim=1, eps=1e-6)
-        cos_sim = (source_norm * target_norm).sum(dim=1)
+            # Cosine similarity
+            cos_sim = (source_norm * target_norm).sum(dim=1)
 
-        residual_map = (1.0 - cos_sim) * valid_map.squeeze(1)
+            # Residual
+            residual_map = (1.0 - cos_sim) * valid_map.squeeze(1)
 
-        norm_t = target_samples.norm(dim=1, keepdim=True).clamp(min=1e-6)
-        grad_t = -(source_norm - cos_sim.unsqueeze(1) * target_norm) / norm_t
-        grad_t = grad_t * valid_map
+            residual_chunks.append(residual_map.view(chunk_end - chunk_start, -1))
+            weight_chunks.append((self.embedding_weight * valid_map.squeeze(1)).view(chunk_end - chunk_start, -1))
 
-        dT_du = (F10 - F00) * one_minus_dv + (F11 - F01) * dv
-        dT_dv = (F01 - F00) * one_minus_du + (F11 - F10) * du
+            if jacobian:
+                # Compute gradient of loss w.r.t. target samples
+                # d/dT [1 - (S·T)/(|S||T|)] = -S/(|S||T|) + (S·T)/(|S||T|²) * T/|T|
+                #                            = -(S/|S| - cos_sim * T/|T|) / |T|
+                norm_t = target_samples.float().norm(dim=1, keepdim=True).clamp(min=1e-6)
+                grad_t = -(source_norm - cos_sim.unsqueeze(1) * target_norm) / norm_t
+                grad_t = grad_t * valid_map
 
-        grad_u = (grad_t * dT_du).sum(dim=1)
-        grad_v = (grad_t * dT_dv).sum(dim=1)
-        grad_u = grad_u * valid_map.squeeze(1)
-        grad_v = grad_v * valid_map.squeeze(1)
+                # Chain rule: gradient w.r.t. coordinates
+                grad_u_weighted = (grad_t * grad_u.float()).sum(dim=1) * valid_map.squeeze(1)
+                grad_v_weighted = (grad_t * grad_v.float()).sum(dim=1) * valid_map.squeeze(1)
+                grad_coords = torch.stack([grad_u_weighted, grad_v_weighted], dim=-1)
+                grad_coords_flat = grad_coords.view(chunk_end - chunk_start, -1, 2)
 
-        grad_coords = torch.stack([grad_u, grad_v], dim=-1)
+                # Jacobians
+                Ji_chunk = Ji[chunk_slice].view(chunk_end - chunk_start, -1, 2, 6)
+                Jj_chunk = Jj[chunk_slice].view(chunk_end - chunk_start, -1, 2, 6)
+                Jz_chunk = Jz[chunk_slice].view(chunk_end - chunk_start, -1, 2, 1)
 
-        residual = residual_map.view(self.n_terms, -1)
-        weight = (self.embedding_weight * valid_map.squeeze(1)).view(self.n_terms, -1)
+                J_pose_i_chunks.append(torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Ji_chunk))
+                J_pose_j_chunks.append(torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jj_chunk))
+                J_disp_chunks.append(torch.einsum("nkd,nkdc->nkc", grad_coords_flat, Jz_chunk))
+
+                if optimize_intrinsics:
+                    Jfi_chunk = Jfi[chunk_slice].view(chunk_end - chunk_start, -1, 2, Jfi.shape[-1])
+                    Jfj_chunk = Jfj[chunk_slice].view(chunk_end - chunk_start, -1, 2, Jfj.shape[-1])
+                    J_intr_chunks.append(
+                        torch.cat(
+                            [
+                                torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfi_chunk),
+                                torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfj_chunk),
+                            ],
+                            dim=0,
+                        )
+                    )
+
+                if optimize_rig:
+                    Jri_chunk = Jri[chunk_slice].view(chunk_end - chunk_start, -1, 2, 6)
+                    Jrj_chunk = Jrj[chunk_slice].view(chunk_end - chunk_start, -1, 2, 6)
+                    J_rig_chunks.append(
+                        torch.cat(
+                            [
+                                torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jri_chunk),
+                                torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jrj_chunk),
+                            ],
+                            dim=0,
+                        )
+                    )
+
+        # Concatenate results
+        residual = torch.cat(residual_chunks, dim=0)
+        weight = torch.cat(weight_chunks, dim=0)
 
         J_dict = {}
         if jacobian:
-            assert Ji is not None and Jj is not None and Jz is not None
-            grad_coords_flat = grad_coords.view(self.n_terms, -1, 2)
-
-            Ji_flat = Ji.view(self.n_terms, -1, 2, 6)
-            Jj_flat = Jj.view(self.n_terms, -1, 2, 6)
-            Jz_flat = Jz.view(self.n_terms, -1, 2, 1)
-
-            J_pose_i = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Ji_flat)
-            J_pose_j = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jj_flat)
-            J_disp = torch.einsum("nkd,nkdc->nkc", grad_coords_flat, Jz_flat)
-
             term_inds = torch.arange(self.n_terms, device=pose.device)
+
+            J_pose_i = torch.cat(J_pose_i_chunks, dim=0)
+            J_pose_j = torch.cat(J_pose_j_chunks, dim=0)
+            J_disp = torch.cat(J_disp_chunks, dim=0)
+
             J_dict = {
                 "pose": SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
                     j_inds=torch.cat([self.pose_i_inds, self.pose_j_inds]),
-                    data=torch.cat([
-                        J_pose_i.view(self.n_terms, -1, 6),
-                        J_pose_j.view(self.n_terms, -1, 6),
-                    ], dim=0),
+                    data=torch.cat(
+                        [
+                            J_pose_i.view(self.n_terms, -1, 6),
+                            J_pose_j.view(self.n_terms, -1, 6),
+                        ],
+                        dim=0,
+                    ),
                 ),
                 "dense_disp": SparseMDiagonalBlockMatrix(
                     i_inds=term_inds,
@@ -447,13 +555,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
             }
 
             if optimize_intrinsics:
-                assert Jfi is not None and Jfj is not None
-                Jfi_flat = Jfi.view(self.n_terms, -1, 2, Jfi.shape[-1])
-                Jfj_flat = Jfj.view(self.n_terms, -1, 2, Jfj.shape[-1])
-                J_intr = torch.cat([
-                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfi_flat),
-                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfj_flat),
-                ], dim=0)
+                J_intr = torch.cat(J_intr_chunks, dim=0)
                 J_dict["intrinsics"] = SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
@@ -464,13 +566,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
                 )
 
             if optimize_rig:
-                assert Jri is not None and Jrj is not None
-                Jri_flat = Jri.view(self.n_terms, -1, 2, 6)
-                Jrj_flat = Jrj.view(self.n_terms, -1, 2, 6)
-                J_rig = torch.cat([
-                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jri_flat),
-                    torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jrj_flat),
-                ], dim=0)
+                J_rig = torch.cat(J_rig_chunks, dim=0)
                 J_dict["rig"] = SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
