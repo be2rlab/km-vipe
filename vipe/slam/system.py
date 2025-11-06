@@ -19,6 +19,7 @@ import numpy as np
 import rerun as rr
 import torch
 import torch.nn.functional as F
+
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 
@@ -28,8 +29,8 @@ from vipe.priors.depth.base import DepthType
 from vipe.streams.base import FrameAttribute, ProcessedVideoStream, StreamProcessor, VideoFrame, VideoStream
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
-from vipe.utils.profiler import profile_function, profiler_section
 from vipe.utils.misc import unpack_optional
+from vipe.utils.profiler import profile_function, profiler_section
 
 from .components.backend import SLAMBackend
 from .components.buffer import GraphBuffer
@@ -87,10 +88,12 @@ class SLAMSystem:
         self.visualize = config.visualize
         self.config = config.copy()
         OmegaConf.set_struct(self.config, False)
-    def get_config_value(self,cfg, key, default=None):
+
+    def get_config_value(self, cfg, key, default=None):
         if isinstance(cfg, dict):
             return cfg.get(key, default)
         return getattr(cfg, key, default)
+
     @profile_function()
     def _build_components(self):
         self.droid_net = DroidNet().to(self.device)
@@ -127,16 +130,21 @@ class SLAMSystem:
             dataset_path = self.get_config_value(dataset_cfg, "dataset_path")
             sequence_name = self.get_config_value(dataset_cfg, "sequence_name")
             # self.metric_depth = make_depth_model(self.config.keyframe_depth,self.config.dataset.dataset_name,self.config.dataset.dataset_path,self.config.dataset.sequence_name)
-            self.metric_depth = make_depth_model(self.config.keyframe_depth,dataset_name,dataset_path,sequence_name)
+            self.metric_depth = make_depth_model(self.config.keyframe_depth,
+                                                 dataset_name, dataset_path,
+                                                 sequence_name)
             assert self.metric_depth.depth_type in [
                 DepthType.METRIC_DEPTH,
                 DepthType.MODEL_METRIC_DEPTH,
             ]
-
         else:
             self.metric_depth = None
 
         self.backend.depth_model = self.metric_depth
+        if self.metric_depth is not None:
+            print(f"Using depth model: {self.metric_depth.depth_type}")
+        else:
+            print("No depth model used!!!!")
 
     @profile_function()
     def _add_keyframe(

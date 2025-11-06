@@ -25,12 +25,12 @@ from vipe.priors.depth import DepthEstimationInput, make_depth_model
 from vipe.priors.depth.alignment import align_inv_depth_to_depth
 from vipe.priors.depth.priorda import PriorDAModel
 from vipe.priors.depth.videodepthanything import VideoDepthAnythingDepthModel
+from vipe.priors.embedding import EmbeddingsPipeline
+from vipe.priors.embedding.dinov3 import DinoV3Variant
 from vipe.priors.geocalib import GeoCalib
 from vipe.priors.track_anything import TrackAnythingPipeline
-from vipe.priors.embedding import EmbeddingsPipeline
 from vipe.slam.interface import SLAMOutput
 from vipe.streams.base import CachedVideoStream, FrameAttribute, StreamProcessor, VideoFrame, VideoStream
-from vipe.priors.embedding.dinov3 import DinoV3Variant
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
 from vipe.utils.misc import unpack_optional
@@ -310,10 +310,9 @@ class EmbeddingsProcessor(StreamProcessor):
 
     def __init__(
         self,
-        model_variant: DinoV3Variant = DinoV3Variant.VITHP,
+        model_variant: DinoV3Variant = DinoV3Variant.VITS,
         weights_dir: str = "/home/user/km-vipe/weights/dinov3",
     ) -> None:
-        
         self.embedder = EmbeddingsPipeline(model_variant=model_variant, weights_dir=weights_dir)
 
     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
@@ -322,4 +321,3 @@ class EmbeddingsProcessor(StreamProcessor):
     def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
         frame.features, frame.features_patch_size = self.embedder.process_frame(frame)
         return frame
-

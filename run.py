@@ -20,22 +20,19 @@ def run(args: DictConfig) -> None:
         profiler.disable()
 
     # Gather all video streams
-    with profiler_section("streams.make"):
-        stream_list = StreamList.make(args.streams)
-
+    stream_list = StreamList.make(args.streams)
     from vipe.pipeline import make_pipeline
     from vipe.utils.logging import configure_logging
 
     # Process each video stream
     logger = configure_logging()
-    with profiler_section("run"):
+    with profiler_section("Vipe"):
         for stream_idx in range(len(stream_list)):
             video_stream = stream_list[stream_idx]
             logger.info(
                 f"Processing {video_stream.name()} ({stream_idx + 1} / {len(stream_list)})"
             )
-            with profiler_section("pipeline.build"):
-                pipeline = make_pipeline(args.pipeline)
+            pipeline = make_pipeline(args.pipeline)
             with profiler_section(f"pipeline.run[{video_stream.name()}]"):
                 pipeline.run(video_stream)
             logger.info(f"Finished processing {video_stream.name()}")
