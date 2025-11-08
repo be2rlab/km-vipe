@@ -1,65 +1,57 @@
 from __future__ import annotations
-import math
-import os
-from typing import List, Tuple, Optional, Dict, Union
 
-import matplotlib.pyplot as plt
+import contextlib
+import os
+import time
+
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Literal, Optional, Tuple, Union
+
 import numpy as np
-from PIL import Image
+import rerun as rr
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as TVT
 import torchvision.transforms.functional as TVTF
+
+from PIL import Image
 from torch import Tensor, nn
-import time
-import contextlib
-from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
 
 
 class DinoV2Variant(str, Enum):
-    VITS        = "vits14"
-    VITB        = "vitb14"
-    VITL        = "vitl14"
-    VITG        = "vitg14"
-    # VITS_REG    = "vits14_reg"
-    # VITB_REG    = "vitb14_reg"
-    # VITL_REG    = "vitl14_reg"
-    # VITG_REG    = "vitg14_reg"
+    VITS = "vits14"
+    VITB = "vitb14"
+    VITL = "vitl14"
+    VITG = "vitg14"
 
-# --- Config -----------------------------------------------------------------
 
 @dataclass(frozen=True)
 class DinoV2Config:
-    hub_id: str              # e.g. "dinov2_vits16"
-    # num_layers: int          # transformer depth
-    weights_filename: Optional[str] = None  # filename or None if not provided
+    hub_id: str  # e.g. "dinov2_vits14"
+    weights_filename: Optional[str] = None
 
-# A single registry is easier to maintain than 3 separate dicts.
+
 REGISTRY: Dict[DinoV2Variant, DinoV2Config] = {
-    DinoV2Variant.VITS:     DinoV2Config("dinov2_vits14",       "dinov2_vits14_pretrain.pth"),
-    DinoV2Variant.VITB:     DinoV2Config("dinov2_vitb14",       "dinov2_vitb14_pretrain.pth"),
-    DinoV2Variant.VITL:     DinoV2Config("dinov2_vitl14",       "dinov2_vitl14_pretrain.pth"),
-    DinoV2Variant.VITG:     DinoV2Config("dinov2_vitg14",       "dinov2_vitg14_pretrain.pth"),
-    # DinoV2Variant.VITS_REG: DinoV2Config("dinov2_vits14_reg",   "dinov2_vits14_reg4_pretrain.pth"),
-    # DinoV2Variant.VITB_REG: DinoV2Config("dinov2_vitb14_reg",   "dinov2_vitb14_reg4_pretrain.pth"),
-    # DinoV2Variant.VITL_REG: DinoV2Config("dinov2_vitl14_reg",   "dinov2_vitl14_reg4_pretrain.pth"),
-    # DinoV2Variant.VITG_REG: DinoV2Config("dinov2_vitg14_reg",   "dinov2_vitg14_reg4_pretrain.pth"),
+    DinoV2Variant.VITS: DinoV2Config("dinov2_vits14", "dinov2_vits14_pretrain.pth"),
+    DinoV2Variant.VITB: DinoV2Config("dinov2_vitb14", "dinov2_vitb14_pretrain.pth"),
+    DinoV2Variant.VITL: DinoV2Config("dinov2_vitl14", "dinov2_vitl14_pretrain.pth"),
+    DinoV2Variant.VITG: DinoV2Config("dinov2_vitg14", "dinov2_vitg14_pretrain.pth"),
 }
 
 Alias = Union[DinoV2Variant, str]
-
 _ALIAS_NORMALIZATION = {
-    "vits": "vits14", "vits14": "vits14",
-    "vitb": "vitb14", "vitb14": "vitb14",
-    "vitl": "vitl14", "vitl14": "vitl14",
-    "vitg": "vitg14", "vitg14": "vitg14",
-    # "vits_reg": "vits14_reg", "vits14_reg": "vits14_reg",
-    # "vitb_reg": "vitb14_reg", "vitb14_reg": "vitb14_reg",
-    # "vitl_reg": "vitl14_reg", "vitl14_reg": "vitl14_reg",
-    # "vitg_reg": "vitg14_reg", "vitg14_reg": "vitg14_reg",
+    "vits": "vits14",
+    "vits14": "vits14",
+    "vitb": "vitb14",
+    "vitb14": "vitb14",
+    "vitl": "vitl14",
+    "vitl14": "vitl14",
+    "vitg": "vitg14",
+    "vitg14": "vitg14",
 }
+
 
 def _normalize_alias(x: str) -> str:
     s = x.lower().replace("_", "").replace("-", "")
@@ -67,6 +59,7 @@ def _normalize_alias(x: str) -> str:
         s = s.replace("dinov2", "", 1)
     s = s.strip()
     return _ALIAS_NORMALIZATION.get(s, s)
+
 
 def get_config(variant: Alias) -> DinoV2Config:
     """Accepts DinoV2Variant or a string alias ('vitl', 'dinov2_vitl14', etc.)."""
@@ -81,56 +74,140 @@ def get_config(variant: Alias) -> DinoV2Config:
 
 class ResizeTransform(nn.Module):
     """Resize image to a fixed size."""
-    
+
     def __init__(self, image_size: int = 768, patch_size: int = 16):
         super().__init__()
         self.image_size = image_size
         self.patch_size = patch_size
-    
-    def forward(self, img):
+
+    def forward(self, img: Image.Image) -> Image.Image:
         w, h = img.size
         h_patches = int(self.image_size / self.patch_size)
         w_patches = int((w * self.image_size) / (h * self.patch_size))
-        return TVTF.resize(img, (h_patches * self.patch_size, w_patches * self.patch_size), interpolation=TVT.InterpolationMode.BICUBIC)
+        return TVTF.resize(
+            img,
+            (h_patches * self.patch_size, w_patches * self.patch_size),
+            interpolation=TVT.InterpolationMode.BICUBIC,
+        )
+
+
+class PyramidUpsampler:
+    """Multi-scale feature upsampling & blending.
+
+    Supports input feature shapes:
+      • [H, W, D]
+      • [B, H, W, D]
+    """
+
+    def __init__(
+        self,
+        scales: Optional[List[float]] = None,
+        blend_mode: Literal["weighted", "average", "max"] = "weighted",
+        device: Optional[str] = None,
+    ):
+        self.scales = scales or [1.0, 0.75, 0.5]
+        self.blend_mode = blend_mode
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    @staticmethod
+    def _to_nchw(x: Tensor) -> Tensor:
+        # [H,W,D] -> [1,D,H,W], [B,H,W,D] -> [B,D,H,W]
+        if x.dim() == 3:
+            return x.permute(2, 0, 1).unsqueeze(0)
+        elif x.dim() == 4:
+            return x.permute(0, 3, 1, 2)
+        else:
+            raise ValueError("Expected feature dims 3 or 4")
+
+    @staticmethod
+    def _from_nchw(x: Tensor, batched: bool) -> Tensor:
+        # [1,D,H,W] -> [H,W,D], [B,D,H,W] -> [B,H,W,D]
+        if batched:
+            return x.permute(0, 2, 3, 1).contiguous()
+        else:
+            return x.squeeze(0).permute(1, 2, 0).contiguous()
+
+    def upsample_single_scale(
+        self,
+        features: Tensor,
+        target_size: Tuple[int, int],  # (H, W)
+        mode: Literal["bilinear", "bicubic"] = "bilinear",
+    ) -> Tensor:
+        batched = features.dim() == 4
+        x = self._to_nchw(features)
+        kwargs = {"size": target_size, "mode": mode}
+        if mode == "bilinear":  # only valid for some modes
+            kwargs["align_corners"] = False
+        out = F.interpolate(x, **kwargs)
+        return self._from_nchw(out, batched)
+
+    def upsample_pyramid(self, features_pyramid: List[Tensor], target_size: Tuple[int, int]) -> Tensor:
+        if not features_pyramid:
+            raise ValueError("Empty feature pyramid")
+
+        first = features_pyramid[0]
+        batched = first.dim() == 4
+        if batched:
+            B = first.shape[0]
+            Ht, Wt, D = target_size[0], target_size[1], first.shape[-1]
+            acc = torch.zeros(B, Ht, Wt, D, device=self.device)
+            wts = torch.zeros(B, Ht, Wt, 1, device=self.device)
+        else:
+            Ht, Wt, D = target_size[0], target_size[1], first.shape[-1]
+            acc = torch.zeros(Ht, Wt, D, device=self.device)
+            wts = torch.zeros(Ht, Wt, 1, device=self.device)
+
+        mode = self.blend_mode
+        for i, feats in enumerate(features_pyramid):
+            up = self.upsample_single_scale(feats, target_size, mode="bilinear")
+            if mode == "weighted":
+                w = self.scales[i] if i < len(self.scales) else 1.0
+                acc = acc + up * w
+                wts = wts + w
+            elif mode == "average":
+                acc = acc + up
+                wts = wts + 1.0
+            elif mode == "max":
+                acc = up if i == 0 else torch.maximum(acc, up)
+            else:
+                raise ValueError(f"Unknown blend mode: {mode}")
+
+        if mode in ("weighted", "average"):
+            return acc / (wts + 1e-8)
+        return acc
 
 
 class DINOv2EmbeddingEngine:
     """
     A comprehensive class for embedding using DINOv2 features.
-    
+
     This class handles:
     - DINOv2 model initialization and loading
     - Frame embedding and dense feature extraction
     - Mask-based feature embedding
     - Visualization of results
     """
-    
+
     def __init__(
         self,
         model: Alias = DinoV2Variant.VITL,
         weights_path: Optional[Union[str, Path]] = None,
         weights_dir: Optional[Union[str, Path]] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        short_side: int = 768, # TODO: check this number
+        short_side: int = 768,  # TODO: check this number
+        pyramid_scales: Optional[List[float]] = None,
+        rerun_app_id: str = "dinov2_embeddings",
+        enable_rerun: bool = True,
     ):
-        """
-        Initialize the DINOv2 engine.
-        
-        Args:
-            model: Variant enum or alias string ('vitl', 'dinov2_vitl16', etc.)
-            weights_path: Explicit path to weights (overrides registry)
-            weights_dir: If provided, will join with registry filename
-            device: 'cuda' or 'cpu'
-            short_side: Target short side for preprocessing (used by ResizeTransform)
-        """
         self.device = device
         self.short_side = short_side
+        self.enable_rerun = enable_rerun
 
-        # Resolve config from alias/enum
+        if self.enable_rerun:
+            rr.init(rerun_app_id, spawn=True)
+
         self.cfg = get_config(model)
-        # self.n_layers = self.cfg.num_layers
 
-        # Resolve weights path
         if weights_path is None and self.cfg.weights_filename and weights_dir is not None:
             weights_path = Path(weights_dir) / self.cfg.weights_filename
         self.weights_path = str(weights_path) if isinstance(weights_path, Path) else weights_path
@@ -139,20 +216,27 @@ class DINOv2EmbeddingEngine:
         self.model = self._load_model(self.cfg.hub_id, self.weights_path)
         self.patch_size = getattr(self.model, "patch_size", 16)
         self.embed_dim = getattr(self.model, "embed_dim", None)
-
-        # Initialize transform
         self.transform = self._create_transform()
 
-        # Initialize tracking state
+        # New: unified upsampler & default scales
+        self.pyramid_scales = pyramid_scales or [1.0, 0.75, 0.5]
+        self.upsampler = PyramidUpsampler(scales=self.pyramid_scales, device=self.device)
+
         self.reset_state()
-        
-        print(f"Initialized DINOv2 engine:")
-        print(f"  Variant hub_id: {self.cfg.hub_id}")
-        # print(f"  Num layers: {self.n_layers}")
-        print(f"  Patch size: {self.patch_size}")
-        print(f"  Embedding dimension: {self.embed_dim}")
-        print(f"  Device: {self.device}")
-    
+        info_text = (
+            f"Initialized DINOv2 engine:\n"
+            f"  Variant hub_id: {self.cfg.hub_id}\n"
+            f"  Patch size: {self.patch_size}\n"
+            f"  Embedding dimension: {self.embed_dim}\n"
+            f"  Device: {self.device}\n"
+            f"  Pyramid scales: {self.pyramid_scales}\n"
+            f"  Rerun enabled: {self.enable_rerun}\n"
+        )
+        print(info_text)
+
+        if self.enable_rerun:
+            rr.log("info", rr.TextDocument(info_text, media_type=rr.MediaType.MARKDOWN))
+
     def _load_model(self, hub_id: str, weights_path: Optional[str]) -> nn.Module:
         """Load DINOv2 model via torch.hub with optional local weights."""
         try:
@@ -161,59 +245,46 @@ class DINOv2EmbeddingEngine:
                 model=hub_id,
                 source="github",
             )
+        except Exception as e:  # pragma: no cover
+            print(f"Error loading model from GitHub ({e}). If needed, provide a local repo path.")
+            raise
 
-            if weights_path and os.path.exists(weights_path):
-                state = torch.load(weights_path, map_location="cpu")
-                # Some DINO checkpoints need strict=False
-                model.load_state_dict(state, strict=False)
-
-            model.to(self.device)
-            model.eval()
-            torch.set_grad_enabled(False)
-            return model
-
-        except Exception as e:
-            print(f"Error loading model from hub ({e}). Falling back to local repo path...")
-            model = torch.hub.load(
-                repo_or_dir="/home/user/km-vipe/dino/dinov2",
-                model=hub_id,
-                source="local",
-            )
-            if weights_path and os.path.exists(weights_path):
+        if weights_path and os.path.exists(weights_path):
+            try:
                 state = torch.load(weights_path, map_location="cpu")
                 model.load_state_dict(state, strict=False)
-            model.to(self.device)
-            model.eval()
-            return model
-    
+            except Exception as e:
+                print(f"Warning: failed to load provided weights: {e}. Using hub defaults.")
+
+        model.to(self.device)
+        model.eval()
+        torch.set_grad_enabled(False)
+        return model
+
     def _create_transform(self) -> TVT.Compose:
-        """Create image preprocessing transform."""
-        return TVT.Compose([
-            ResizeTransform(image_size=self.short_side, patch_size=self.patch_size),
-            TVT.ToTensor(),
-            TVT.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-    
+        return TVT.Compose(
+            [
+                ResizeTransform(image_size=self.short_side, patch_size=self.patch_size),
+                TVT.ToTensor(),
+                TVT.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
+
     def reset_state(self):
-        """Reset the tracking state for processing a new video."""
-        self.features_queue: List[Tensor] = []
-        self.probs_queue: List[Tensor] = []
-        self.first_feats: Optional[Tensor] = None
-        self.first_probs: Optional[Tensor] = None
-        self.neighborhood_mask: Optional[Tensor] = None
         self.num_masks: int = 0
         self.frame_height: int = 0
         self.frame_width: int = 0
         self.feats_height: int = 0
         self.feats_width: int = 0
-    
-    def embed_frame(self, image: Union[Image.Image, Tensor]) -> Tensor:
-        """
-        Extract dense pixel-wise features from a single frame.
 
-        Returns:
-            Tensor [h, w, D] on self.device
-        """
+    def _amp_context(self):
+        if self.device == "cuda":
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            return torch.amp.autocast(device_type="cuda", dtype=dtype)
+        return contextlib.nullcontext()
+
+    def embed_frame(self, image: Union[Image.Image, Tensor], frame_idx: Optional[int] = None) -> Tensor:
+        """Extract dense pixel-wise features from a single frame → [h, w, D]."""
         if isinstance(image, Image.Image):
             img_tensor = self.transform(image).to(self.device, non_blocking=True)  # [C,H,W]
         elif isinstance(image, Tensor):
@@ -221,124 +292,374 @@ class DINOv2EmbeddingEngine:
         else:
             raise ValueError("Input image must be a PIL Image or a Tensor")
 
-        self.model.eval()
+        # Log original image to Rerun
+        if self.enable_rerun and frame_idx is not None:
+            rr.set_time_sequence("frame", frame_idx)
+            if isinstance(image, Image.Image):
+                rr.log("input/image", rr.Image(np.array(image)))
 
-        # Proper AMP context
-        if self.device == "cuda":
-            use_bf16 = torch.cuda.is_bf16_supported()
-            amp_ctx = torch.amp.autocast(
-                device_type="cuda",
-                dtype=torch.bfloat16 if use_bf16 else torch.float16
-            )
-        else:
-            amp_ctx = contextlib.nullcontext()
-
-        with torch.inference_mode(), amp_ctx:
-            # Ensure batch dimension: [1, C, H, W]
-            x = img_tensor.unsqueeze(0)
-
-            # DINO(v2/v2) API commonly returns a list of feature maps
-            # Here we assume reshape=True,norm=True yields [B, D, h, w] per layer
-            feats_list = self.model.get_intermediate_layers(
-                x, n=1, reshape=True, norm=True
-            )
-
-            feats = feats_list[0]
-            feats = feats[0]                            # [D, h, w] (explicit, no .squeeze())
-            feats = feats.permute(1, 2, 0).contiguous() # [h, w, D]
-
-        # Keep on device to avoid later device mismatches
-        # (Move to CPU only where/when you actually need it.)
+        with torch.inference_mode(), self._amp_context():
+            x = img_tensor.unsqueeze(0)  # [1,C,H,W]
+            feats_list = self.model.get_intermediate_layers(x, n=1, reshape=True, norm=True)
+            feats = feats_list[0]  # [1, D, h, w]
+            feats = feats[0].permute(1, 2, 0).contiguous()  # [h,w,D]
+        h, w, _ = feats.shape
+        self.feats_height, self.feats_width = int(h), int(w)
+        if isinstance(image, Image.Image):
+            self.frame_width, self.frame_height = image.size
         return feats
+
+    def embed_batch(self, batch_chw: Tensor) -> Tensor:
+        """Batch embedding.
+
+        Args:
+            batch_chw: [B, C, H, W] tensor (already transformed/normalized)
+        Returns:
+            [B, h, w, D] features
+        """
+        if batch_chw.dim() != 4:
+            raise ValueError("Expected batch tensor of shape [B,C,H,W]")
+        batch_chw = batch_chw.to(self.device, non_blocking=True)
+        with torch.inference_mode(), self._amp_context():
+            feats_list = self.model.get_intermediate_layers(batch_chw, n=1, reshape=True, norm=True)
+            feats = feats_list[0]  # [B, D, h, w]
+            feats = feats.permute(0, 2, 3, 1).contiguous()  # [B,h,w,D]
+        return feats
+
+    def embed_frame_multiscale(
+        self, image: Union[Image.Image, Tensor], scales: Optional[List[float]] = None
+    ) -> List[Tensor]:
+        """Extract features at multiple input scales. Returns list[[h_i, w_i, D], ...]."""
+        scales = scales or self.pyramid_scales
+        if isinstance(image, Image.Image):
+            base = self.transform(image).to(self.device)
+        else:
+            base = image.to(self.device)
+        _, H, W = base.shape
+        feats_pyr: List[Tensor] = []
+        with torch.inference_mode(), self._amp_context():
+            for s in scales:
+                if s == 1.0:
+                    scaled = base
+                else:
+                    Nh = max(self.patch_size, int(round(H * s)))
+                    Nw = max(self.patch_size, int(round(W * s)))
+                    # keep patch alignment
+                    Nh = ((Nh + self.patch_size - 1) // self.patch_size) * self.patch_size
+                    Nw = ((Nw + self.patch_size - 1) // self.patch_size) * self.patch_size
+                    scaled = F.interpolate(
+                        base.unsqueeze(0), size=(Nh, Nw), mode="bicubic", align_corners=False
+                    ).squeeze(0)
+                flist = self.model.get_intermediate_layers(scaled.unsqueeze(0), n=1, reshape=True, norm=True)
+                f = flist[0][0].permute(1, 2, 0).contiguous()  # [h,w,D]
+                feats_pyr.append(f)
+        return feats_pyr
+
+    def embed_batch_multiscale(self, batch_chw: Tensor, scales: Optional[List[float]] = None) -> List[Tensor]:
+        """Multi-scale features for a batch tensor.
+
+        Args:
+            batch_chw: [B, C, H, W]
+        Returns:
+            List of [B, h_i, w_i, D]
+        """
+        scales = scales or self.pyramid_scales
+        B, C, H, W = batch_chw.shape
+        batch_chw = batch_chw.to(self.device)
+        outputs: List[Tensor] = []
+        with torch.inference_mode(), self._amp_context():
+            for s in scales:
+                if s == 1.0:
+                    scaled = batch_chw
+                else:
+                    Nh = max(self.patch_size, int(round(H * s)))
+                    Nw = max(self.patch_size, int(round(W * s)))
+                    Nh = ((Nh + self.patch_size - 1) // self.patch_size) * self.patch_size
+                    Nw = ((Nw + self.patch_size - 1) // self.patch_size) * self.patch_size
+                    scaled = F.interpolate(batch_chw, size=(Nh, Nw), mode="bicubic", align_corners=False)
+                flist = self.model.get_intermediate_layers(scaled, n=1, reshape=True, norm=True)
+                f = flist[0].permute(0, 2, 3, 1).contiguous()  # [B,h,w,D]
+                outputs.append(f)
+        return outputs
+
+    def upsample_features(
+        self,
+        features: Union[Tensor, List[Tensor]],
+        target_size: Tuple[int, int],
+        method: Literal["bilinear", "bicubic", "pyramid_weighted", "pyramid_average", "pyramid_max"] = "bilinear",
+    ) -> Tensor:
+        """Upsample feature(s) to target (H,W).
+
+        If `features` is a list, pyramid_* methods are used (with blending).
+        If `features` is a tensor, single-scale interpolation is used.
+        Supports both [H,W,D] and [B,H,W,D] feature tensors.
+        """
+        if method.startswith("pyramid"):
+            if not isinstance(features, list):
+                raise ValueError("Pyramid methods require a List[Tensor] from embed_*_multiscale().")
+            blend = method.split("_", 1)[1]  # weighted/average/max
+            self.upsampler.blend_mode = blend  # set mode dynamically
+            return self.upsampler.upsample_pyramid(features, target_size)
+        else:
+            if not isinstance(features, Tensor):
+                raise ValueError("Single-scale methods require a Tensor.")
+            if method not in ("bilinear", "bicubic"):
+                raise ValueError(f"Unknown upsample method: {method}")
+            return self.upsampler.upsample_single_scale(features, target_size, mode=method)
 
     def embed_frame_with_masks(
         self,
         image: Union[Image.Image, Tensor],
         masks: np.ndarray,
         return_mask_probs: bool = True,
+        frame_idx: Optional[int] = None,
     ) -> Tuple[Tensor, Optional[Tensor], Dict[int, Tensor]]:
-        """
-        Args:
-            image: Input frame
-            masks: HxW integer mask image where each value encodes an instance/class.
-            return_mask_probs: if True returns one-hot [h, w, M]; can be large.
+        """Dense features + per-mask pooled vectors.
 
         Returns:
-            dense_features: [h, w, D] (on self.device)
-            mask_probs: [h, w, M] or None (on self.device, float32)
-            mask_embeddings: {mask_id: [D]} (each on self.device)
+            dense_features: [h, w, D]
+            mask_probs: [h, w, M] (if return_mask_probs)
+            mask_embeddings: {mask_id: [D]}
         """
-        dense_features = self.embed_frame(image)  # [h,w,D] on device
+        dense_features = self.embed_frame(image, frame_idx=frame_idx)  # [h,w,D]
         h, w, D = dense_features.shape
-
-        # Cache shapes for later consumers if needed
         self.feats_height, self.feats_width = int(h), int(w)
-
         if isinstance(image, Image.Image):
-            processed_img = self.transform(image).to(self.device, non_blocking=True)  # [C,H',W']
-            _, self.frame_height, self.frame_width = processed_img.shape
+            self.frame_width, self.frame_height = image.size
 
-        # --- Masks ---
-        # (1) to device, long dtype
-        masks_tensor = torch.as_tensor(masks, device=self.device, dtype=torch.long)  # [H,W]
-
-        # (2) resize to feature resolution with nearest kernel
-        masks_resized = F.interpolate(
-            masks_tensor[None, None].float(),  # [1,1,H,W]
-            size=(h, w),
-            mode="nearest"
-        )[0, 0].long()  # [h,w]
-
-        # (3) number of masks (assume background == 0)
+        masks_tensor = torch.as_tensor(masks, device=self.device, dtype=torch.long)
+        masks_resized = F.interpolate(masks_tensor[None, None].float(), size=(h, w), mode="nearest")[0, 0].long()
         num_masks = int(masks_resized.max().item()) + 1
         self.num_masks = num_masks
 
-        # (4) optional one-hot (warning: can be large [h,w,M])
+        # Log masks to Rerun
+        if self.enable_rerun and frame_idx is not None:
+            rr.set_time_sequence("frame", frame_idx)
+            mask_rgb = self.mask_to_rgb(masks, num_masks)
+            rr.log("masks/segmentation", rr.SegmentationImage(masks))
+            rr.log("masks/visualization", rr.Image(mask_rgb))
+
         mask_probs = None
         if return_mask_probs:
             mask_probs = F.one_hot(masks_resized, num_classes=num_masks).to(torch.float32)
 
-        # --- Vectorized mask embeddings ---
-        # flatten
-        labels = masks_resized.view(-1)           # [N]
-        feats = dense_features.view(-1, D)        # [N,D]
-
-        # sum features per mask id
+        labels = masks_resized.view(-1)  # [N]
+        feats = dense_features.view(-1, D)  # [N,D]
         sums = torch.zeros(num_masks, D, device=self.device, dtype=feats.dtype)
-        sums.index_add_(0, labels, feats)         # accumulate rows into sums[labels]
-
-        # count per mask id
+        sums.index_add_(0, labels, feats)
         counts = torch.bincount(labels, minlength=num_masks).clamp_min(1).unsqueeze(1)  # [M,1]
-
-        means = sums / counts                      # [M,D]
-
-        # Build dict (skip background id=0)
-        mask_embeddings: Dict[int, Tensor] = {
-            int(i): means[i] for i in range(1, num_masks) if counts[i].item() > 0
-        }
-
+        means = sums / counts
+        mask_embeddings: Dict[int, Tensor] = {int(i): means[i] for i in range(1, num_masks) if counts[i].item() > 0}
         return dense_features, mask_probs, mask_embeddings
 
+    @staticmethod
+    def mask_to_rgb(mask: Union[np.ndarray, Tensor], num_masks: int) -> np.ndarray:
+        """Convert segmentation mask to RGB visualization."""
+        if isinstance(mask, Tensor):
+            mask = mask.cpu().numpy().astype(int)
+        else:
+            mask = mask.astype(int)
 
+        # Generate a simple, deterministic color palette
+        colors = np.zeros((num_masks + 1, 3), dtype=np.uint8)
+        for i in range(1, num_masks):  # Skip background
+            r = i * 123457 % 255
+            g = i * 345679 % 255
+            b = i * 789013 % 255
+            colors[i] = [r, g, b]
+
+        mask_rgb = colors[mask]
+        return mask_rgb
+
+    def visualize_embeddings(
+        self,
+        features: Tensor,
+        method: Literal["mean", "std", "norm", "naive_rgb"] = "naive_rgb",
+        entity_path: str = "features",
+        frame_idx: Optional[int] = None,
+    ):
+        """Visualize DINOv2 feature embeddings in Rerun.
+
+        Args:
+            features: Feature tensor of shape [h, w, D] or [B, h, w, D]
+            method: Reduction method ('mean', 'std', 'norm', 'naive_rgb')
+            entity_path: Base path for logging to Rerun
+            frame_idx: Optional frame index for timeline
+        """
+        if not self.enable_rerun:
+            return
+
+        if frame_idx is not None:
+            rr.set_time_sequence("frame", frame_idx)
+
+        if features.dim() == 4:
+            # Handle batched features - visualize first item
+            features = features[0]
+
+        f = features.detach().cpu()
+        H, W, D = f.shape
+
+        vis_features = None
+        if method == "mean":
+            vis_features = f.mean(dim=-1).numpy()
+            vis_features = (vis_features - vis_features.min()) / (vis_features.max() - vis_features.min() + 1e-8)
+        elif method == "std":
+            vis_features = f.std(dim=-1).numpy()
+            vis_features = (vis_features - vis_features.min()) / (vis_features.max() - vis_features.min() + 1e-8)
+        elif method == "norm":
+            vis_features = torch.linalg.norm(f, dim=-1).numpy()
+            vis_features = (vis_features - vis_features.min()) / (vis_features.max() - vis_features.min() + 1e-8)
+        elif method == "naive_rgb":
+            if D < 3:
+                print("Warning: 'naive_rgb' requires >= 3 feature dimensions. Skipping.")
+                return
+
+            vis_features_rgb = f[..., :3].numpy()
+            for i in range(3):
+                channel = vis_features_rgb[..., i]
+                min_val, max_val = channel.min(), channel.max()
+                vis_features_rgb[..., i] = (channel - min_val) / (max_val - min_val + 1e-8)
+
+            vis_uint8 = (vis_features_rgb * 255).astype(np.uint8)
+            rr.log(f"{entity_path}/naive_rgb", rr.Image(vis_uint8))
+            return
+        else:
+            raise ValueError(f"Unknown visualization method: {method}")
+
+        if vis_features is not None:
+            rr.log(f"{entity_path}/{method}", rr.DepthImage(vis_features))
+
+    def visualize_feature_similarity(
+        self,
+        features: Tensor,
+        query_points: List[Tuple[int, int]],
+        entity_path: str = "similarity",
+        frame_idx: Optional[int] = None,
+    ):
+        """Visualize feature similarity maps for specific query points in Rerun.
+
+        Args:
+            features: Feature tensor of shape [h, w, D]
+            query_points: List of (y, x) coordinates to use as query points
+            entity_path: Base path for logging to Rerun
+            frame_idx: Optional frame index for timeline
+        """
+        if not self.enable_rerun:
+            return
+
+        if frame_idx is not None:
+            rr.set_time_sequence("frame", frame_idx)
+
+        if features.dim() == 4:
+            features = features[0]
+
+        f = features.detach()
+        h, w, D = f.shape
+
+        # Log query points
+        query_positions = np.array([[x, y] for y, x in query_points], dtype=np.float32)
+        rr.log(f"{entity_path}/query_points", rr.Points2D(query_positions, radii=5, colors=[255, 0, 0]))
+
+        features_flat = f.view(-1, D)
+        for i, (qy, qx) in enumerate(query_points):
+            if qy >= h or qx >= w:
+                print(f"Query point ({qy}, {qx}) is out of bounds for features shape ({h}, {w})")
+                continue
+
+            query_feat = f[qy, qx].unsqueeze(0)
+            similarities = F.cosine_similarity(query_feat, features_flat, dim=1)
+            sim_map = similarities.view(h, w).cpu().numpy()
+
+            # Normalize similarity map
+            sim_map = (sim_map - sim_map.min()) / (sim_map.max() - sim_map.min() + 1e-8)
+
+            rr.log(f"{entity_path}/query_{i + 1}", rr.DepthImage(sim_map))
+
+    def get_memory_usage(self) -> Dict[str, float]:
+        """Get current GPU memory usage statistics."""
+        if self.device == "cuda" and torch.cuda.is_available():
+            stats = {
+                "allocated_gb": torch.cuda.memory_allocated() / (2**30),
+                "reserved_gb": torch.cuda.memory_reserved() / (2**30),
+                "max_allocated_gb": torch.cuda.max_memory_allocated() / (2**30),
+            }
+            return stats
+        return {"message": "CUDA not available"}
+
+
+# =============================================================================
+# Demo
+# =============================================================================
 def demo_usage():
-    tracker = DINOv2EmbeddingEngine(
-        model=DinoV2Variant.VITL,                               # or "vithp" / "dinov2_vith16plus"
-        weights_dir="/home/user/km-vipe/weights/dinov2"         # used if registry has a filename
+    """Demonstration of DINOv2 with Rerun visualization."""
+    engine = DINOv2EmbeddingEngine(
+        model=DinoV2Variant.VITS,
+        weights_dir=None,
+        short_side=448,
+        pyramid_scales=[2.0, 1.5, 1.0, 0.75],
+        rerun_app_id="dinov2_demo",
+        enable_rerun=True,
     )
-    
-    dummy_frames = []
-    for i in range(1):
-        dummy_frames.append(Image.open(f"/data/{str(i).zfill(6)}.jpg"))
-        test_image = dummy_frames[-1]
-        t0 = time.time()
-        features = tracker.embed_frame(test_image)  # Warm-up
-        print(f"Frame {i} embedded: features shape {features.shape}, dtype {features.dtype}, device {features.device}")
-        t1 = time.time()
-        print(f"Warm-up embedding time: {t1 - t0:.3f} seconds")
-        # tracker.visualize_embeddings(features, test_image, method="pca", num_components=3, 
-        #                            title="DINOv2 Features - PCA RGB")
-        
+
+    # Example image paths - update these to your data
+    image_dir = "/data/Replica/replica/office0/rgb"
+    image_files = [f"{image_dir}/frame{str(i).zfill(6)}.jpg" for i in range(10)]
+
+    # Demo pyramid upsampling on last frame
+    if image_files:
+        print(f"\n{'=' * 60}")
+        print("--- Demonstrating Pyramid Upsampling ---")
+        print(f"{'=' * 60}")
+
+        for i, image in enumerate(image_files):
+            last_img = Image.open(image).convert("RGB")
+            target_h, target_w = last_img.height, last_img.width
+            print(f"Original image size (H, W): ({target_h}, {target_w})")
+
+            # Extract multi-scale features
+            print("Extracting multi-scale features...")
+            t_start = time.time()
+            features_pyramid = engine.embed_frame_multiscale(last_img)
+            t_end = time.time()
+            print(f"Multi-scale extraction done in {t_end - t_start:.3f}s")
+            for idx, feat in enumerate(features_pyramid):
+                print(f"  Scale {engine.pyramid_scales[idx]}: {feat.shape}")
+
+            # Blend pyramid with weighted method
+            print("Blending pyramid with 'pyramid_weighted'...")
+            t_start = time.time()
+            blended_features = engine.upsample_features(
+                features=features_pyramid, target_size=(target_h, target_w), method="pyramid_weighted"
+            )
+            t_end = time.time()
+            print(f"Pyramid blending done in {t_end - t_start:.3f}s")
+            print(f"Final Blended Feature Shape: {blended_features.shape}")
+
+            # Visualize blended features
+            engine.visualize_embeddings(
+                blended_features,
+                method="naive_rgb",
+                entity_path="visualizations/pyramid_weighted_rgb",
+                frame_idx=i,
+            )
+
+            # Compare with simple bilinear upsampling
+            print("Comparing with standard 'bilinear' upsample...")
+            single_scale_features = features_pyramid[0]
+            bilinear_features = engine.upsample_features(
+                features=single_scale_features, target_size=(target_h, target_w), method="bilinear"
+            )
+            engine.visualize_embeddings(
+                bilinear_features,
+                method="naive_rgb",
+                entity_path="visualizations/bilinear_rgb",
+                frame_idx=i,
+            )
+
+            print(f"\n{'=' * 60}")
+            print("Demo complete! Check the Rerun viewer for visualizations.")
+            print(f"{'=' * 60}")
+
 
 if __name__ == "__main__":
-    # Run demonstration
     demo_usage()
