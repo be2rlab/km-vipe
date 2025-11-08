@@ -439,7 +439,6 @@ class GraphBuffer:
         weight_dense_disp, weight_tracks = 0.001, 0.001
         # weight_dense_disp, weight_tracks = 0.001, 0.0
         # weight_dense_disp, weight_tracks = 0.0, 0.001
-        # print(f"The alpha dictionary here is {alpha_dic}")
 
         pi, qi, di, pj, qj, dj = self.expand_edge_multiview(ii, jj)
         di_unique = torch.unique(di)
