@@ -419,3 +419,9 @@ yourdfpy==0.0.58
     # via viser
 zstandard==0.24.0
     # via rosbags
+
+fairscale==0.4.4
+
+pycocoevalcap
+
+clip @ git+https://github.com/openai/CLIP.git

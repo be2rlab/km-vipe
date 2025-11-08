@@ -43,8 +43,18 @@ def load_gt_poses_replica(gt_file):
     return transform_to_evo_trajectory(poses)
 
 
-def load_gt_poses_tum(gt_file):
+def load_gt_poses_tum(gt_file,rgb_file):
+    timestamps = []
+    with open(rgb_file,'r') as f:
+        for line in f:
+            if line[0] == '#':
+                continue
+            image_name = line.split(' ')[1].split('/')[1]
+            frame_timestamp = float(image_name.split('.png')[0])
+            timestamps.append(frame_timestamp)
     poses = []
+    final_poses = []
+    gt_timestamps = []
     with open(gt_file, 'r') as f:
         for line in f:
             if '#' not in line:
@@ -55,21 +65,30 @@ def load_gt_poses_tum(gt_file):
                 pose[:3, :3] = rotation_matrix
                 pose[:3, 3] = [tx, ty, tz]
                 poses.append(pose.flatten())
+                gt_timestamps.append(float(timestamp))
+    gt_timestamps = np.array(gt_timestamps)
+    for ts in timestamps:
+        idx = np.argmin(np.abs(gt_timestamps - ts))
+        final_poses.append(poses[idx])
 
-    return transform_to_evo_trajectory(poses)
+
+    return transform_to_evo_trajectory(final_poses)
 
 
 def load_gt_poses(args):
-    if args.dataset == "replica" or args.dataset == "aria":
+    if args.dataset == "replica":
         gt_file = os.path.join(args.gt_folder, args.scene_name, "traj.txt")
         if not os.path.exists(gt_file):
             raise FileNotFoundError(f"Ground truth file not found: {gt_file}")
         return load_gt_poses_replica(gt_file)
     if args.dataset == "tum":
+        rgb_file = os.path.join(args.gt_folder, args.scene_name, "rgb.txt")
         gt_file = os.path.join(args.gt_folder, args.scene_name, "groundtruth.txt")
         if not os.path.exists(gt_file):
             raise FileNotFoundError(f"Ground truth file not found: {gt_file}")
-        return load_gt_poses_tum(gt_file)
+        if not os.path.exists(rgb_file):
+            raise FileNotFoundError(f"rgb file not found: {rgb_file}")
+        return load_gt_poses_tum(gt_file,rgb_file)
     else: 
         raise Exception(f"{args.dataset} is not supported!") 
 
@@ -130,7 +149,7 @@ def write_to_csv(csv_file, scene_name, rmse):
 
 def main():
     parser = argparse.ArgumentParser(description='Compute RMSE ATE error')
-    parser.add_argument("--dataset", type=str, required=True, help="Dataset (Replica, TUM, etc.)")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset (replica, TUM, etc.)")
     parser.add_argument('--gt_folder', type=str, required=True, help='Path to ground truth folder')
     parser.add_argument('--results_folder', type=str, required=True, help='Path to results folder')
     parser.add_argument('--scene_name', type=str, required=True, help='Name of the scene')

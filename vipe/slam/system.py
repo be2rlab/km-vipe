@@ -37,6 +37,7 @@ from .components.motion_filter import MotionFilter
 from .components.sparse_tracks import build_sparse_tracks
 from .interface import SLAMOutput
 from .networks.droid_net import DroidNet
+import random
 
 
 class StandardResizeStreamProcessor(StreamProcessor):
@@ -142,6 +143,7 @@ class SLAMSystem:
         buffer_masks: torch.Tensor | None,
         frame_data_list: list[VideoFrame],
         phase: int,
+        instances: torch.Tensor | None = None
     ):
         assert phase in [1, 2]
         kf_idx = self.buffer.n_frames
@@ -151,6 +153,16 @@ class SLAMSystem:
         self.buffer.nets[kf_idx], self.buffer.inps[kf_idx] = self.droid_net.encode_context(images)
         if buffer_masks is not None:
             self.buffer.masks[kf_idx] = buffer_masks
+        if instances is not None:
+            self.buffer.instances[kf_idx] = instances
+            # print(f"the shape is {instances.shape}")
+            self.buffer.visualize_instance_mask(instances[0],f"instanc_masks/image_{kf_idx}.png")
+            unique_instances = torch.unique(instances)
+
+            for unique_instance in unique_instances:
+                id_int = int(unique_instance.cpu().item())
+                if id_int not in self.buffer.instancesid_2_instancenames:
+                    self.buffer.instancesid_2_instancenames[id_int] = frame_data_list[0].instance_phrases[np.uint8(id_int)]
 
         for view_idx, frame_data in enumerate(frame_data_list):
             if kf_idx == 0:
@@ -190,6 +202,7 @@ class SLAMSystem:
     def _precompute_features(self, frame_data_list: list[VideoFrame]):
         images_list = []
         masks_list = []
+        instances_list = []
         for frame_data in frame_data_list:
             images_list.append(frame_data.rgb)
             if frame_data.mask is not None:
@@ -204,12 +217,19 @@ class SLAMSystem:
                     > 0.9
                 )
                 masks_list.append(~mask)
+                num_classes = int(frame_data.instance.max().item() + 1)
+                instance = torch.nn.functional.one_hot(frame_data.instance.long(), num_classes).permute(2,0,1).float()
+                instance = instance.unsqueeze(0)  # (1, C, H, W)
+                pooled = torch.nn.functional.avg_pool2d(instance, kernel_size=8, stride=8)
+                instance = pooled.argmax(dim=1).squeeze(0)  # (H/f, W/f)
+                instances_list.append(instance)
         images = rearrange(torch.stack(images_list), "n h w c -> n c h w")
         if masks_list:
             masks = torch.stack(masks_list)
+            instances = torch.stack(instances_list)
         else:
             masks = None
-        return images, masks
+        return images, masks, instances
 
     @torch.no_grad()
     def run(
@@ -258,13 +278,13 @@ class SLAMSystem:
             enumerate(zip(*video_streams)), desc="SLAM Pass (1/2)", total=total_n_frames
         ):
             
-            images, buffer_masks = self._precompute_features(frame_data_list)
+            images, buffer_masks,instance_masks = self._precompute_features(frame_data_list)
             
             self.sparse_tracks.track_image(frame_data_list)
             
             if self.motion_filter.check(images, buffer_masks) or frame_idx == total_n_frames - 1:
                 is_keyframe = True
-                self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=1)
+                self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=1,instances=instance_masks)
             else:
                 is_keyframe = False
             
@@ -295,8 +315,8 @@ class SLAMSystem:
         for frame_idx, frame_data_list in pbar(
             enumerate(zip(*video_streams)), desc="SLAM Pass (2/2)", total=total_n_frames
         ):
-            images, buffer_masks = self._precompute_features(frame_data_list)
-            self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=2)
+            images, buffer_masks,instance_masks = self._precompute_features(frame_data_list)
+            self._add_keyframe(frame_idx, images, buffer_masks, frame_data_list, phase=2,instances=instance_masks)
             if self.inner_filler.check() or frame_idx == total_n_frames - 1:
                 self.inner_filler.compute()
 

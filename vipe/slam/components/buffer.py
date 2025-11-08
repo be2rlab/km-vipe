@@ -41,6 +41,9 @@ from ..interface import SLAMMap
 from ..maths import geom
 from ..maths.retractor import DenseDispRetractor, IntrinsicsRetractor, PoseRetractor, RigRotationOnlyRetractor
 from .sparse_tracks import SparseTracks
+from ..ba.kernel import HuberRobustKernel, AdaptiveBarronRobustKernel
+import random
+import cv2
 
 
 logger = logging.getLogger(__name__)
@@ -134,6 +137,16 @@ class GraphBuffer:
             device=device,
             dtype=torch.bool,
         )
+        self.instances = torch.zeros(
+            buffer_size,
+            self.n_views,
+            self.height // 8,
+            self.width // 8,
+            device=device,
+            dtype=torch.int,
+        )
+        self.instancesid_2_instancenames = {}
+        self.id_to_color = {}
 
         # Droid attributes
         # The updated operator will take the correlation volume of fmaps, the nets, and the inps,
@@ -214,6 +227,34 @@ class GraphBuffer:
         k_mat[:, 0] /= 8
         k_mat[:, 1] /= 8
         return k_mat
+
+    def visualize_instance_mask(self,mask, save_path=None):
+        """
+        Convert an instance mask (H,W) into an RGB image where each instance id
+        has a unique color. Reuses colors for consistent visualization.
+        """
+        mask = mask.cpu().numpy()
+        # Create empty RGB image
+        H, W = mask.shape
+        rgb_image = np.zeros((H, W, 3), dtype=np.uint8)
+
+        unique_ids = np.unique(mask)
+        for inst_id in unique_ids:
+            if inst_id == 0:
+                continue  # Optional: skip background
+
+            if inst_id not in self.id_to_color:
+                # Generate a random RGB color (avoid too-dark colors)
+                color = tuple(random.randint(50, 255) for _ in range(3))
+                self.id_to_color[inst_id] = color
+            else:
+                color = self.id_to_color[inst_id]
+
+            rgb_image[mask == inst_id] = color
+
+        # Optionally save the RGB image
+        if save_path is not None:
+            cv2.imwrite(save_path, cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR))
 
     def remove_second_newest(self, ix: int):
         assert ix == self.n_frames - 2
@@ -388,6 +429,7 @@ class GraphBuffer:
         optimize_intrinsics: bool,
         optimize_rig_rotation: bool,
         verbose: bool,
+        alpha_dic : dict | None = None
     ):
         """
         This function is just an extraction from the factor_graph.
@@ -397,6 +439,7 @@ class GraphBuffer:
         weight_dense_disp, weight_tracks = 0.001, 0.001
         # weight_dense_disp, weight_tracks = 0.001, 0.0
         # weight_dense_disp, weight_tracks = 0.0, 0.001
+        # print(f"The alpha dictionary here is {alpha_dic}")
 
         pi, qi, di, pj, qj, dj = self.expand_edge_multiview(ii, jj)
         di_unique = torch.unique(di)
@@ -417,7 +460,9 @@ class GraphBuffer:
                 rig=None,
                 image_size=(self.height // 8, self.width // 8),
                 camera_type=self.camera_type,
-            )
+                local_instance_masks_i = self.instances[pi,qi],
+                alpha_dict= alpha_dic
+            ), AdaptiveBarronRobustKernel()
         )
 
         if self.sparse_tracks.enabled:

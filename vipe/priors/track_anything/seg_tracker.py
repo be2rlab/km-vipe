@@ -7,16 +7,17 @@ import numpy as np
 from .aot_tracker import get_aot
 from .detector import Detector
 from .segmentor import Segmentor
-
+from .annotator import Annotator
 
 class SegTracker:
-    def __init__(self, segtracker_args, sam_args, aot_args) -> None:
+    def __init__(self, segtracker_args, sam_args, aot_args,ram_args) -> None:
         """
         Initialize SAM and AOT.
         """
         self.sam = Segmentor(sam_args)
         self.tracker = get_aot(aot_args)
         self.detector = Detector(self.sam.device)
+        self.annotator = Annotator(ram_args)
         self.sam_gap = segtracker_args["sam_gap"]
         self.min_area = segtracker_args["min_area"]
         self.max_obj_num = segtracker_args["max_obj_num"]
@@ -137,6 +138,7 @@ class SegTracker:
         text_threshold: float = 0.0,
         box_size_threshold=1,
         reset_image=False,
+        use_ram = True
     ):
         """
         Using Grounding-DINO to detect object acc Text-prompts
@@ -149,10 +151,22 @@ class SegTracker:
         bc_mask = self.origin_merged_mask
         seg_phrase = {}
 
-        # get annotated_frame and boxes
+        if use_ram:
+            words = self.annotator.annotate(origin_frame)
+            grounding_caption = "".join([m + "." for m in words])   
         annotated_frame_shape, boxes, phrases = self.detector.run_grounding(
             origin_frame, grounding_caption, box_threshold, text_threshold
         )
+        keep_indices = []
+        exclude_words = ['living room','room','stairs','floor','wooden floor', 'shelf', 'cabinet', 'door', 'window', 'wooden door',
+                         'armchair','sofa','kitchen','kitchen table','dinning table','hardwood floor','couch','carpet','fire place',
+                         'ceiling','stairwell','bedroom','shelve','bed']
+        # exclude_words_set = {word.lower() for word in exclude_words}
+        for i, phrase in enumerate(phrases):
+            if not phrase in exclude_words:
+                keep_indices.append(i)
+        boxes = boxes[keep_indices] if len(keep_indices) > 0 else np.empty((0, 2, 2))
+        phrases = [phrases[i] for i in keep_indices]    
         refined_merged_mask = np.zeros(annotated_frame_shape, dtype=np.uint8)
         for i in range(len(boxes)):
             bbox = boxes[i]

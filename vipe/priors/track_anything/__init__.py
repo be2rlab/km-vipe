@@ -7,6 +7,7 @@ from pathlib import Path
 import gdown
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 
 from vipe.streams.base import VideoFrame
 
@@ -36,6 +37,18 @@ class TrackAnythingPipeline:
                 "https://drive.google.com/file/d/1QoChMkTVxdYZ_eBlZhK2acq9KMQZccPJ/view",
                 output=str(aot_ckpt_path),
                 fuzzy=True,
+            )
+        ram_cache_dir = Path(torch.hub.get_dir()) / "ram"
+        ram_ckpt_path = ram_cache_dir / "ram_plus_swin_large_14m.pth"
+
+        if not ram_ckpt_path.exists():
+            ram_cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            ckpt_path = hf_hub_download(
+                repo_id="xinyu1205/recognize-anything-plus-model",
+                filename="ram_plus_swin_large_14m.pth",
+                local_dir=ram_cache_dir,
+                local_dir_use_symlinks=False  # saves actual file, not symlink
             )
 
         self.threshold_args = {
@@ -75,6 +88,11 @@ class TrackAnythingPipeline:
                 "max_len_long_term": 9999,
                 "gpu_id": 0,
             },
+            ram_args={
+                'device':'cuda:0',
+                'image_size': 384,
+                'checkpoint_path': str(ram_ckpt_path),
+            }
         )
         self.segtracker.restart_tracker()
         self.instance_phrase = {0: "background"}

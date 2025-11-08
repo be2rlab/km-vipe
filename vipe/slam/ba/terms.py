@@ -27,7 +27,7 @@ from vipe.utils.cameras import CameraType
 from ..maths import geom
 from ..maths.matrix import SparseBlockMatrix, SparseDenseBlockMatrix, SparseMDiagonalBlockMatrix
 from ..maths.vector import SparseBlockVector
-from .kernel import RobustKernel
+from .kernel import RobustKernel, HuberRobustKernel, AdaptiveBarronRobustKernel
 
 
 class TermEvalReturn(ABC):
@@ -52,6 +52,8 @@ class ConcreteTermEvalReturn(TermEvalReturn):
     J: dict[str, SparseBlockMatrix]  # group_name -> (n_occ, res_dim, manifold_dim)
     w: torch.Tensor  # (n_terms, res_dim, )
     r: torch.Tensor  # (n_terms, res_dim, )
+    instance_ids: torch.Tensor = None # (n_terms, res_dim)
+    alpha_dict: dict | None = None
 
     # n_occ = number of occurrences of this group_name in all the terms.
     # i.e. the number of blocks in the sparse Jacobian matrix with size n_terms x n_vars
@@ -72,7 +74,31 @@ class ConcreteTermEvalReturn(TermEvalReturn):
         self.J[group_name] = j_group.subset(keep_mask)
 
     def apply_robust_kernel(self, kernel: RobustKernel):
-        robust_weight = kernel.apply(self.r)
+        # if the kernel is Barron and we have the dict of alpha and instance then we need to select alpha for each edge
+        if isinstance(kernel,AdaptiveBarronRobustKernel) and self.instance_ids is not None and self.alpha_dict is not None:
+            n_terms, n_pix = self.instance_ids.shape  # (n_terms, H*W)
+            device = self.instance_ids.device
+            # Initialize alpha_params with zeros
+            alpha_params = torch.zeros((n_terms, n_pix, 2), device=device)
+            for t in range(n_terms):
+                # get per-term instance ids and alpha map
+                instance_ids = self.instance_ids[t]  # shape: (H*W,)
+                alpha_map = self.alpha_dict[t]    # dict {instance_id: alpha_value}
+                # create tensor of alpha values per pixel
+                alpha_per_pixel = torch.zeros_like(instance_ids, dtype=torch.float, device=device)
+                for inst_id, alpha_val in alpha_map.items():
+                    mask = instance_ids == inst_id
+                    alpha_per_pixel[mask] = float(alpha_val)
+
+                # repeat for the two residual components (x and y)
+                alpha_params[t] = alpha_per_pixel.unsqueeze(-1).repeat(1, 2)
+
+            # flatten the last two dims to match self.r shape (n_terms, H*W*2)
+            alpha_params = alpha_params.reshape(n_terms, -1)
+            robust_weight = kernel.apply(self.r, alpha_params)
+        else:
+            robust_weight = kernel.apply(self.r)
+
         self.w = self.w * robust_weight
 
     def residual(self) -> torch.Tensor:
@@ -116,6 +142,8 @@ class DenseDepthFlowTerm(SolverTerm):
         rig: SE3 | None,
         image_size: tuple[int, int],
         camera_type: CameraType,
+        local_instance_masks_i: torch.Tensor | None = None,
+        alpha_dict: dict | None = None
     ) -> None:
         super().__init__()
 
@@ -133,6 +161,7 @@ class DenseDepthFlowTerm(SolverTerm):
         self.dense_disp_i_inds = dense_disp_i_inds
         self.image_size = image_size
         self.camera_type = camera_type
+        self.local_instance_masks_i = local_instance_masks_i
 
         n_pixels = image_size[0] * image_size[1]
 
@@ -141,6 +170,7 @@ class DenseDepthFlowTerm(SolverTerm):
         self.intrinsics = intrinsics.reshape(-1, 4) if intrinsics is not None else None  # (Q, 4)
         self.intrinsics_factor = intrinsics_factor
         self.rig = rig
+        self.alpha_dict = alpha_dict
 
     def group_names(self) -> set[str]:
         names = {"pose", "dense_disp"}
@@ -235,12 +265,16 @@ class DenseDepthFlowTerm(SolverTerm):
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
-
+        instance_ids = self.local_instance_masks_i
+        if self.local_instance_masks_i is not None:
+            instance_ids = rearrange(instance_ids,"n h w -> n (h w)")
         return ConcreteTermEvalReturn(
             J=J_dict,
             w=weight,
             r=rearrange(coords - self.target, "n hw c -> n (hw c)", c=2),
-        )
+            instance_ids= instance_ids,
+            alpha_dict= self.alpha_dict
+                    )
 
 
 class DispSensRegularizationTerm(SolverTerm):

@@ -23,13 +23,16 @@ import warnings
 import numpy as np
 import rerun as rr
 import torch
-
+import cv2
 from einops import rearrange
 
 from vipe.ext.lietorch import SE3
 
 from ..networks.droid_net import AltCorrBlock, CorrBlock, DroidNet
 from .buffer import GraphBuffer
+import pandas as pd
+import math
+import json
 
 
 # Disable all future warnings (mainly torch.cuda.amp related)
@@ -90,6 +93,9 @@ class FactorGraph:
         # They could be later revived in BA if use_inactive=True)
         self.ii_inac = torch.as_tensor([], dtype=torch.long, device=device)
         self.jj_inac = torch.as_tensor([], dtype=torch.long, device=device)
+        self.alpha_inac = []
+        self.alpha = []
+        self.bb_list = []
         self.target_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
         self.weight_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
 
@@ -184,10 +190,13 @@ class FactorGraph:
             self.jj_inac = torch.cat([self.jj_inac, self.jj[mask]], 0)
             self.target_inac = torch.cat([self.target_inac, self.target[:, exp_mask]], 1)
             self.weight_inac = torch.cat([self.weight_inac, self.weight[:, exp_mask]], 1)
+            removed_alphas = [item for item, include in zip(self.alpha, mask) if include]
+            self.alpha_inac = self.alpha_inac + removed_alphas
 
         self.ii = self.ii[~mask]
         self.jj = self.jj[~mask]
         self.age = self.age[~mask]
+        self.alpha = [item for item, include in zip(self.alpha, mask) if not include]
 
         if self.corr is not None:
             self.corr = self.corr[~exp_mask]
@@ -217,6 +226,7 @@ class FactorGraph:
         if torch.any(m):
             self.ii_inac = self.ii_inac[~m]
             self.jj_inac = self.jj_inac[~m]
+            self.alpha_inac = [item for item, include in zip(self.alpha_inac,m) if not include]
             m_exp = m.view(-1, 1).repeat(1, self.buffer.n_views).view(-1)
             self.target_inac = self.target_inac[:, ~m_exp]
             self.weight_inac = self.weight_inac[:, ~m_exp]
@@ -237,6 +247,7 @@ class FactorGraph:
         motion_only: bool = False,
         fixed_motion: bool = False,
         limited_disp: bool = False,
+        iteration_number : int | None = None
     ):
         """run update operator on factor graph"""
         assert self.incremental
@@ -269,7 +280,43 @@ class FactorGraph:
         self.f_net, delta, weight, damping, _ = self.net.update.forward(  # type: ignore
             self.f_net, self.inp, corr, motn, ix=dix
         )
-        weight[:, self.buffer.masks[pi, qi]] = 0.0
+        # weight[:, self.buffer.masks[pi, qi]] = 0.0
+        instances_bboxes = self.get_instance_bboxes(self.buffer.instances[pi,qi],expand=3)
+        result = self.compute_instance_flow_means(self.buffer.instances[pi,qi],instances_bboxes,delta[0],self.buffer.disps_sens[pi,qi],weight[0])
+        # This alpha_per_instance should be self.alpha
+        self.alpha = []
+        for i in range(len(result)):
+            frame_alpha_dict = {}
+            frame_alpha_dict[0] = 2.0
+            counter = 0
+
+            for instance_id, vals in result[i].items():
+                mask_flow = vals['mask_flow']
+                bg_flow = vals['bg_flow']
+                if self.buffer.instancesid_2_instancenames[instance_id] in ['person','hand']:
+                    frame_alpha_dict[instance_id] = -10
+                    print("person detected!")
+                    continue
+
+                mask_flow_magnitude = np.linalg.norm(np.array(mask_flow),axis=0)
+                bg_flow_magnitude = np.linalg.norm(np.array(mask_flow),axis=0)
+                ratio = mask_flow_magnitude/bg_flow_magnitude
+                alpha_val = 2.0
+
+                if ratio >0.85 and ratio < 1.15:
+                    cos_sim = (mask_flow[0] * bg_flow[0] + mask_flow[1] * bg_flow[1]) / (mask_flow_magnitude * bg_flow_magnitude)
+                    if cos_sim > 0.9:
+                        continue
+                    else:
+                        alpha_val = -10.0
+                        counter +=1
+                else:
+                    alpha_val = -10
+                    counter +=1
+
+                frame_alpha_dict[instance_id] = alpha_val
+            # print(f"Number of filtered masks: {counter}/{len(result[i])}")
+            self.alpha.append(frame_alpha_dict)
 
         with torch.cuda.amp.autocast(enabled=False):
             self.target = coords1 + delta.to(dtype=torch.float)
@@ -284,9 +331,10 @@ class FactorGraph:
                 exp_m = m.view(-1, 1).repeat(1, self.buffer.n_views).view(-1)
                 target = torch.cat([self.target_inac[:, exp_m], self.target], 1)
                 weight = torch.cat([self.weight_inac[:, exp_m], self.weight], 1)
+                alpha_values = self.alpha_inac + self.alpha
 
             else:
-                ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
+                ii, jj, target, weight, alpha_values = self.ii, self.jj, self.target, self.weight, self.alpha
 
             ht, wd = self.coords0.shape[0:2]
             target = rearrange(target, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
@@ -309,6 +357,7 @@ class FactorGraph:
                 optimize_intrinsics=False,
                 optimize_rig_rotation=False,
                 verbose=False,
+                alpha_dic= alpha_values
             )
 
         self.age += 1
@@ -347,6 +396,7 @@ class FactorGraph:
 
             # Apply the update operator in batches of size s to reduce memory usage.
             s = 8
+            self.alpha = [dict() for _ in range(self.f_net.shape[1])]
             assert self.jj.max() >= self.ii.max()
             for i in range(0, self.jj.max() + 1, s):
                 v = (self.ii >= i) & (self.ii < i + s)
@@ -364,8 +414,51 @@ class FactorGraph:
                         motn[:, v_exp],
                         ix=dixs,
                     )
-                    weight[:, self.buffer.masks[pis, qis]] = 0.0
+                    # weight[:, self.buffer.masks[pis, qis]] = 0.0
+                # _____________________________________________
+                instances_bboxes = self.get_instance_bboxes(self.buffer.instances[pis,qis])
+                # new_weights = torch.ones_like(weight[0])
+                result = self.compute_instance_flow_means(self.buffer.instances[pis,qis],instances_bboxes,delta[0],self.buffer.disps_sens[pis,qis],weight[0])
+                # This alpha_per_instance should be self.alpha
+                local_alpha = []
+                for i in range(len(result)):
+                    frame_alpha_dict = {}
+                    frame_alpha_dict[0] = 2.0
+                    counter = 0
 
+                    for instance_id, vals in result[i].items():
+                        mask_flow = vals['mask_flow']
+                        bg_flow = vals['bg_flow']
+                        if self.buffer.instancesid_2_instancenames[instance_id] in ['person','hand']:
+                            frame_alpha_dict[instance_id] = -10
+                            print("person detected!")
+                            continue
+                        mask_flow_magnitude = np.linalg.norm(np.array(mask_flow),axis=0)
+                        bg_flow_magnitude = np.linalg.norm(np.array(mask_flow),axis=0)
+                        ratio = mask_flow_magnitude/bg_flow_magnitude
+                        alpha_val = 2.0
+
+                        if ratio >0.8 and ratio < 1.2:
+                            cos_sim = (mask_flow[0] * bg_flow[0] + mask_flow[1] * bg_flow[1]) / (mask_flow_magnitude * bg_flow_magnitude)
+                            if cos_sim > 0.85:
+                                continue
+                            else:
+                                alpha_val = -10.0
+                                counter +=1
+                        else:
+                            alpha_val = -10
+                            counter +=1
+
+                        frame_alpha_dict[instance_id] = alpha_val
+                    # print(f"Number of filtered masks: {counter}/{len(result[i])}")
+
+                    local_alpha.append(frame_alpha_dict)
+                #_______________________________________________
+                u = 0
+                for i,value in enumerate(v_exp):
+                    if value:
+                        self.alpha[i] = local_alpha[u]
+                        u +=1
                 self.f_net[:, v_exp] = net
                 self.target[:, v_exp] = coords1[:, v_exp] + delta.float()
                 self.weight[:, v_exp] = weight.float()
@@ -391,6 +484,7 @@ class FactorGraph:
                 optimize_intrinsics=optimize_intrinsics,
                 optimize_rig_rotation=optimize_rig_rotation,
                 verbose=solver_verbose,
+                alpha_dic= self.alpha
             )
 
     def add_neighborhood_factors(self, t0, t1, r: int = 3):
@@ -493,3 +587,273 @@ class FactorGraph:
         inactive_edges = torch.stack([center_pos[self.ii_inac], center_pos[self.jj_inac]], dim=1)
         rr.log("world/active_edges", rr.LineStrips3D(active_edges.cpu().numpy()))
         rr.log("world/inactive_edges", rr.LineStrips3D(inactive_edges.cpu().numpy()))
+
+    def get_instance_bboxes(self,masks: torch.Tensor, expand: int = 2):
+        """
+        Given a tensor of shape [n, H, W] where each pixel value is an instance ID,
+        returns bounding boxes for each non-background instance in every image.
+
+        Args:
+            masks (torch.Tensor): Tensor of shape [n, H, W].
+            expand (int): Number of pixels to expand the bounding box on each side.
+
+        Returns:
+            List[dict]: A list of length n, where each element is a dict:
+                        {instance_id: [ymin, xmin, ymax, xmax]}.
+        """
+        n, H, W = masks.shape
+        all_bboxes = []
+
+        for i in range(n):
+            mask = masks[i]
+            instance_ids = torch.unique(mask)
+            instance_bboxes = {}
+
+            for instance_id in instance_ids:
+                if instance_id.item() == 0:
+                    continue  # Skip background
+
+                ys, xs = torch.nonzero(mask == instance_id, as_tuple=True)
+                if len(ys) == 0:
+                    continue
+
+                ymin, ymax = ys.min().item(), ys.max().item()
+                xmin, xmax = xs.min().item(), xs.max().item()
+
+                # Expand slightly, staying inside image bounds
+                ymin = max(ymin - expand, 0)
+                xmin = max(xmin - expand, 0)
+                ymax = min(ymax + expand, H - 1)
+                xmax = min(xmax + expand, W - 1)
+
+                instance_bboxes[int(instance_id)] = [ymin, xmin, ymax, xmax]
+
+            all_bboxes.append(instance_bboxes)
+
+        return all_bboxes
+
+
+
+
+    def compute_instance_flow_means(self,
+        masks: torch.Tensor,
+        bboxes: list,
+        flow: torch.Tensor,
+        inv_depth: torch.Tensor,
+        weights: torch.Tensor,
+        clamp_min: float = 1e-6
+    ):
+        """
+        Compute weighted mean optical flow vectors (normalized by inverse depth)
+        for each instance and its background area inside the bounding box.
+
+        Args:
+            masks (torch.Tensor): [n, H, W] tensor of instance IDs.
+            bboxes (list[dict]): Output from get_instance_bboxes().
+            flow (torch.Tensor): [n, H, W, 2] optical flow vectors.
+            inv_depth (torch.Tensor): [n, H, W] inverse depth values.
+            weights (torch.Tensor): [n, H, W,2] confidence weights for each flow vector.
+            clamp_min (float): Minimum clamp value for numerical stability.
+
+        Returns:
+            List[dict]: For each image i, a dict:
+                {
+                instance_id: {
+                    "mask_flow": [mean_u, mean_v],
+                    "bg_flow": [mean_u, mean_v]
+                },
+                ...
+                }
+        """
+        n, H, W = masks.shape
+        assert len(bboxes) == n, "bboxes list length must match number of images"
+        assert flow.shape[:3] == (n, H, W), "flow must match mask spatial dimensions"
+        assert inv_depth.shape == (n, H, W), "inv_depth must match mask shape"
+        assert weights.shape == (n, H, W,2), "weights must match mask shape"
+
+        inv_depth = inv_depth.clamp_min(clamp_min)
+        weights = weights.clamp_min(clamp_min)
+
+        results = []
+
+        for i in range(n):
+            mask = masks[i]
+            flow_i = flow[i]
+            inv_depth_i = inv_depth[i]
+            weights_i = weights[i]
+
+            # Normalize flow by inverse depth
+            flow_norm = flow_i * inv_depth_i.unsqueeze(-1)
+
+            instance_flows = {}
+
+            for instance_id, (ymin, xmin, ymax, xmax) in bboxes[i].items():
+                mask_crop = mask[ymin:ymax+1, xmin:xmax+1]
+                flow_crop = flow_norm[ymin:ymax+1, xmin:xmax+1]
+                weights_crop = weights_i[ymin:ymax+1, xmin:xmax+1]
+
+                # Regions
+                mask_area = (mask_crop == instance_id)
+                bg_area = (mask_crop == 0)
+                if (mask_area.sum() < 40):
+                    continue
+
+                def weighted_mean_flow(area_mask):
+                    """Helper to compute weighted mean flow for each flow component."""
+                    if area_mask.any():
+                        # Select pixels inside region
+                        area_flow = flow_crop[area_mask]      # [N, 2]
+                        area_weights = weights_crop[area_mask]  # [N, 2]
+
+                        # Weighted sum per channel
+                        weighted_sum = (area_flow * area_weights).sum(dim=0)  # [2]
+                        total_weight = area_weights.sum(dim=0)                # [2]
+
+                        return (weighted_sum / total_weight).tolist()
+                    else:
+                        return [0.0, 0.0]
+
+                mask_flow_mean = weighted_mean_flow(mask_area)
+                bg_flow_mean = weighted_mean_flow(bg_area)
+
+                instance_flows[int(instance_id)] = {
+                    "mask_flow": mask_flow_mean,
+                    "bg_flow": bg_flow_mean
+                }
+
+            results.append(instance_flows)
+
+        return results
+
+
+
+    def compute_flow_cov_eigens(self, delta, instances):
+        """
+        Compute eigenvalues and eigenvectors of optical flow covariance
+        for each instance mask in each frame (edge).
+
+        Args:
+            instances: np.ndarray of shape (n_edges, H, W)
+                Each pixel holds an instance ID.
+            delta: np.ndarray of shape (1, n_edges, H, W, 2)
+                Dense optical flow (u, v) for each pixel.
+
+        Returns:
+            result: list of dicts
+                Each list element corresponds to one frame (edge),
+                and each dict maps instance_id -> {"eigvals", "eigvecs"}.
+        """
+
+        n_edges = instances.shape[0]
+        if 'torch' in str(type(delta)):
+            delta = delta.detach().cpu().numpy().astype(np.float32)
+        if 'torch' in str(type(instances)):
+            instances = instances.detach().cpu().numpy()
+        result = []
+
+        for e in range(n_edges):
+            frame_instances = instances[e]
+            frame_flow = delta[0, e]  # shape (H, W, 2)
+            instance_ids = np.unique(frame_instances)
+            frame_result = {}
+
+            for inst_id in instance_ids:
+                # if inst_id == 0:  # assuming 0 means background
+                #     continue
+
+                mask = frame_instances == inst_id
+                flow_pixels = frame_flow[mask]  # shape (N, 2)
+
+                if flow_pixels.shape[0] < 30:
+                    continue  # not enough data for covariance
+
+                # Compute covariance of optical flow vectors
+                mean_flow = np.mean(flow_pixels, axis=0, keepdims=True)
+                centered_flow = flow_pixels - mean_flow
+                cov = np.cov(centered_flow.T)  # shape (2, 2)
+
+                # Handle numerical issues
+                if not np.all(np.isfinite(cov)):
+                    continue
+
+                # Eigen decomposition
+                eigvals, eigvecs = np.linalg.eig(cov)
+
+                # Sort eigenvalues descending (for consistency)
+                idx = np.argsort(eigvals)[::-1]
+                eigvals = eigvals[idx]
+                eigvecs = eigvecs[:, idx]
+
+                frame_result[int(inst_id)] = {
+                    "eigvals": eigvals,   # shape (2,)
+                    "eigvecs": eigvecs,   # shape (2, 2)
+                }
+
+            result.append(frame_result)
+
+        return result
+
+    def compute_flow_mean_direction(self, delta, instances):
+        """
+        Compute the mean normalized flow vector and direction for each instance mask.
+
+        Args:
+            instances: np.ndarray of shape (n_edges, H, W)
+                Each pixel holds an instance ID.
+            delta: np.ndarray of shape (1, n_edges, H, W, 2)
+                Dense optical flow (u, v) for each pixel.
+
+        Returns:
+            result: list of dicts
+                Each list element corresponds to one frame (edge),
+                and each dict maps instance_id -> {"mean_vector", "direction"}.
+        """
+        n_edges = instances.shape[0]
+        if 'torch' in str(type(delta)):
+            delta = delta.detach().cpu().numpy().astype(np.float32)
+        if 'torch' in str(type(instances)):
+            instances = instances.detach().cpu().numpy()
+
+        result = []
+
+        for e in range(n_edges):
+            frame_instances = instances[e]
+            frame_flow = delta[0, e]  # shape (H, W, 2)
+            instance_ids = np.unique(frame_instances)
+            frame_result = {}
+
+            for inst_id in instance_ids:
+                mask = frame_instances == inst_id
+                flow_pixels = frame_flow[mask]  # shape (N, 2)
+
+                if flow_pixels.shape[0] < 40:
+                    continue  # not enough data
+
+                # Normalize each flow vector to magnitude 1
+                magnitudes = np.linalg.norm(flow_pixels, axis=1, keepdims=True)
+                magnitudes[magnitudes == 0] = 1e-6  # avoid division by zero
+                normalized_flow = flow_pixels / magnitudes
+
+                # Compute mean vector of the normalized flow
+                mean_vector = np.mean(normalized_flow, axis=0)
+                magnitude = np.sqrt(mean_vector[0]**2 + mean_vector[1]**2)
+
+                # Compute direction of the mean vector
+                direction = np.arctan2(mean_vector[1], mean_vector[0])  # radians
+
+                frame_result[int(inst_id)] = {
+                    "mean_vector": mean_vector,  # shape (2,)
+                    "direction": direction,      # float (radians)
+                    "magnitude": magnitude,
+                }
+
+            result.append(frame_result)
+
+        return result
+
+    def sigmoid(self,x):
+        return 1.0 / (1.0 + np.exp(-x))
+
+    def compute_alpha_from_metric(self,metric, alpha_static=2.0, alpha_dynamic=-10.0, s0=0.0, k=8.0):
+        """Maps motion metric -> alpha using a smooth sigmoid mapping."""
+        return alpha_dynamic + (alpha_static - alpha_dynamic) * self.sigmoid(k * (metric - s0))
