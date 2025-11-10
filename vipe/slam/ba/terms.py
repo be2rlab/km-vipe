@@ -13,10 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -29,6 +33,9 @@ from ..maths import geom
 from ..maths.matrix import SparseBlockMatrix, SparseDenseBlockMatrix, SparseMDiagonalBlockMatrix
 from ..maths.vector import SparseBlockVector
 from .kernel import RobustKernel
+
+
+logger = logging.getLogger(__name__)
 
 
 class TermEvalReturn(ABC):
@@ -244,7 +251,25 @@ class DenseDepthFlowTerm(SolverTerm):
 
 
 class EmbeddingSimilarityTerm(SolverTerm):
-    """Tightly couples pose and disparity updates with embedding similarity."""
+    """
+    Embedding similarity term with correct photometric-style residuals and Jacobians.
+
+    Residual (per pixel):
+        r = residual_scale * sqrt( 2 * (1 - cos(s, t)) )       if use_photometric_residual
+        r = 1 - cos(s, t)                                      otherwise
+
+    where:
+        s = normalized source embedding at (i)
+        t = normalized target embedding at projected coords in (j), with
+            normalization done *after* bilinear sampling of the raw target features.
+
+    The Jacobian correctly accounts for the normalization of the sampled target feature:
+        d cos(s, t) / d u = (s - (s·t) t) / ||u||,   u = target_raw_sampled,  t = u / ||u||
+        dr/dc = -(residual_scale**2) / r   (photometric style) or -1 (plain 1 - cos)
+
+    Notes:
+    - intrinsics_factor default is 1.0. Scaling guards against division by zero.
+    """
 
     def __init__(
         self,
@@ -263,10 +288,12 @@ class EmbeddingSimilarityTerm(SolverTerm):
         intrinsics: torch.Tensor | None = None,
         intrinsics_factor: float = 8.0,
         rig: SE3 | None = None,
-        chunk_size: int = 4,  # Process in chunks to save memory
+        chunk_size: int = 4,
+        residual_scale: float = 2.0,
+        use_photometric_residual: bool = True,
+        debug_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
-
         self.n_terms = pose_i_inds.shape[0]
         assert pose_i_inds.shape == (self.n_terms,)
         assert pose_j_inds.shape == (self.n_terms,)
@@ -283,23 +310,50 @@ class EmbeddingSimilarityTerm(SolverTerm):
         self.dense_disp_j_inds = dense_disp_j_inds
         self.camera_type = camera_type
 
-        self.embeddings = embeddings
+        # Store raw embeddings and a pre-normalized copy for the *source* (no sampling on source)
+        assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
+        self.embeddings = embeddings.float()
+        self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
+
         self.embedding_valid_mask = embedding_valid_mask
+        if embedding_valid_mask is not None:
+            assert embedding_valid_mask.dim() == 3, (
+                f"embedding_valid_mask must be 3D (N_views, H, W), got {embedding_valid_mask.dim()}D"
+            )
+            assert embedding_valid_mask.shape[1:] == image_size, (
+                f"embedding_valid_mask spatial dims {embedding_valid_mask.shape[1:]} must match image_size {image_size}"
+            )
+
         self.embedding_weight = weight
         self.chunk_size = chunk_size
+        self.residual_scale = residual_scale
+        self.use_photometric_residual = use_photometric_residual
 
         self.image_size = image_size
         self.height, self.width = image_size
-
-        assert embeddings.dim() == 4, "Embeddings must be flattened as (NV, C, H, W)"
-        assert embeddings.shape[2] == self.height and embeddings.shape[3] == self.width, (
-            "Embeddings resolution must match BA image size"
-        )
-        assert embedding_valid_mask is None or embedding_valid_mask.shape[1:] == image_size
+        assert embeddings.shape[2] == self.height and embeddings.shape[3] == self.width
+        self.embedding_dim = embeddings.shape[1]
 
         self.intrinsics = intrinsics.reshape(-1, 4) if intrinsics is not None else None
         self.intrinsics_factor = intrinsics_factor
         self.rig = rig
+        self._debug_options = debug_options or {}
+        self.debug_enabled = self._parse_bool(self._debug_options.get("enabled", False))
+        self.debug_log_every = max(1, self._parse_int(self._debug_options.get("log_every", 1)))
+        self.debug_log_stats = self._parse_bool(self._debug_options.get("log_stats", self.debug_enabled))
+        self.debug_visualize = self.debug_enabled and self._parse_bool(self._debug_options.get("save_heatmaps", False))
+        self.debug_samples_per_snapshot = max(1, self._parse_int(self._debug_options.get("samples_per_snapshot", 1)))
+        self.debug_max_snapshots = max(0, self._parse_int(self._debug_options.get("max_snapshots", 0)))
+        output_dir_value = self._debug_options.get("output_dir", "vipe_results/debug_embedding")
+        self.debug_dir = (
+            Path(output_dir_value)
+            if (self.debug_visualize and self.debug_max_snapshots > 0 and output_dir_value not in (None, "null"))
+            else None
+        )
+        if self.debug_dir is not None:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+        self._forward_calls = 0
+        self._debug_saved = 0
 
     def group_names(self) -> set[str]:
         names = {"pose", "dense_disp"}
@@ -315,54 +369,50 @@ class EmbeddingSimilarityTerm(SolverTerm):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Optimized bilinear sampling with analytical gradients.
-        Uses efficient indexing and vectorized operations.
 
         Args:
-            features: (N, C, H, W)
-            coords: (N, H, W, 2) in (x, y) format in pixel coordinates
-            return_grad: whether to compute gradients
-
+            features: (N, C, H, W) float32
+            coords:   (N, H, W, 2) in pixel (x, y)
         Returns:
             samples: (N, C, H, W)
-            grad_u: (N, C, H, W) if return_grad else None
-            grad_v: (N, C, H, W) if return_grad else None
+            grad_u:  (N, C, H, W) if return_grad else None
+            grad_v:  (N, C, H, W) if return_grad else None
         """
-        N, C, H, W = features.shape
+        N, C, Hf, Wf = features.shape
+        _, Hc, Wc, _ = coords.shape
 
+        device = features.device
         u = coords[..., 0]
         v = coords[..., 1]
 
-        # Clamp coordinates to valid range
-        u_clamped = u.clamp(0.0, W - 1.0)
-        v_clamped = v.clamp(0.0, H - 1.0)
+        u_clamped = u.clamp(0.0, Wf - 1.0)
+        v_clamped = v.clamp(0.0, Hf - 1.0)
 
-        # Floor coordinates
-        x0 = torch.floor(u_clamped).long()
-        y0 = torch.floor(v_clamped).long()
-        x1 = torch.clamp(x0 + 1, max=W - 1)
-        y1 = torch.clamp(y0 + 1, max=H - 1)
+        x0 = u_clamped.floor()
+        y0 = v_clamped.floor()
+        x0_int = x0.long()
+        y0_int = y0.long()
+        x1_int = (x0_int + 1).clamp(max=Wf - 1)
+        y1_int = (y0_int + 1).clamp(max=Hf - 1)
 
-        # Interpolation weights
-        du = u_clamped - x0.float()
-        dv = v_clamped - y0.float()
+        du = u_clamped - x0
+        dv = v_clamped - y0
 
-        # Expand for broadcasting
-        du_exp = du.unsqueeze(1)  # (N, 1, H, W)
+        flat_features = features.view(N, C, -1)
+
+        idx_00 = (y0_int * Wf + x0_int).view(N, 1, -1).expand(-1, C, -1)
+        idx_10 = (y0_int * Wf + x1_int).view(N, 1, -1).expand(-1, C, -1)
+        idx_01 = (y1_int * Wf + x0_int).view(N, 1, -1).expand(-1, C, -1)
+        idx_11 = (y1_int * Wf + x1_int).view(N, 1, -1).expand(-1, C, -1)
+
+        F00 = torch.gather(flat_features, 2, idx_00).view(N, C, Hc, Wc)
+        F10 = torch.gather(flat_features, 2, idx_10).view(N, C, Hc, Wc)
+        F01 = torch.gather(flat_features, 2, idx_01).view(N, C, Hc, Wc)
+        F11 = torch.gather(flat_features, 2, idx_11).view(N, C, Hc, Wc)
+
+        du_exp = du.unsqueeze(1)
         dv_exp = dv.unsqueeze(1)
 
-        # Gather corner values efficiently using gather
-        flat_features = features.view(N, C, -1)
-        idx_00 = (y0 * W + x0).view(N, 1, H, W).expand(-1, C, -1, -1)
-        idx_10 = (y0 * W + x1).view(N, 1, H, W).expand(-1, C, -1, -1)
-        idx_01 = (y1 * W + x0).view(N, 1, H, W).expand(-1, C, -1, -1)
-        idx_11 = (y1 * W + x1).view(N, 1, H, W).expand(-1, C, -1, -1)
-
-        F00 = torch.gather(flat_features, 2, idx_00.view(N, C, -1)).view(N, C, H, W)
-        F10 = torch.gather(flat_features, 2, idx_10.view(N, C, -1)).view(N, C, H, W)
-        F01 = torch.gather(flat_features, 2, idx_01.view(N, C, -1)).view(N, C, H, W)
-        F11 = torch.gather(flat_features, 2, idx_11.view(N, C, -1)).view(N, C, H, W)
-
-        # Bilinear interpolation weights
         w00 = (1 - du_exp) * (1 - dv_exp)
         w10 = du_exp * (1 - dv_exp)
         w01 = (1 - du_exp) * dv_exp
@@ -373,18 +423,73 @@ class EmbeddingSimilarityTerm(SolverTerm):
         if not return_grad:
             return samples, None, None
 
-        # Analytical gradients w.r.t. u and v
         grad_u = (F10 - F00) * (1 - dv_exp) + (F11 - F01) * dv_exp
         grad_v = (F01 - F00) * (1 - du_exp) + (F11 - F10) * du_exp
-
         return samples, grad_u, grad_v
 
+    def compute_residual_and_jacobian(
+        self,
+        source_norm: torch.Tensor,  # (N, C, H, W), normalized
+        target_raw_sampled: torch.Tensor,  # (N, C, H, W), raw sampled
+        grad_u: torch.Tensor,  # (N, C, H, W)
+        grad_v: torch.Tensor,  # (N, C, H, W)
+        valid_map: torch.Tensor,  # (N, 1, H, W)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute residual and gradients w.r.t. image coordinates, accounting for
+        normalization after sampling of the target features.
+
+        Returns:
+            residual:   (N, H, W)
+            grad_coords:(N, H, W, 2)
+        """
+        eps = 1e-8
+
+        # Normalize AFTER sampling
+        u = target_raw_sampled
+        u_norm = u.norm(dim=1, keepdim=True).clamp_min(eps)
+        t_norm = u / u_norm  # (N, C, H, W)
+
+        # Cosine similarity and residual
+        cos_sim = (source_norm * t_norm).sum(dim=1)  # (N, H, W)
+
+        if self.use_photometric_residual:
+            # r = s * sqrt(2(1 - c))
+            residual = self.residual_scale * torch.sqrt(2.0 * (1.0 - cos_sim).clamp(min=0.0))
+            # dr/dc = -(s^2)/r
+            grad_scale = -(self.residual_scale**2) / (residual.clamp(min=1e-6) + 1e-8)
+        else:
+            # r = 1 - c
+            residual = 1.0 - cos_sim
+            grad_scale = -1.0
+
+        # Mask residuals
+        residual = residual * valid_map.squeeze(1)
+
+        # d cos / d u = (s - (s·t) t) / ||u||
+        proj = source_norm - (cos_sim.unsqueeze(1) * t_norm)  # (N, C, H, W)
+        dcos_du = proj / u_norm
+
+        # dr/du = (dr/dc) * (dc/du)
+        grad_u_feat = grad_scale.unsqueeze(1) * dcos_du
+        grad_u_feat = grad_u_feat * valid_map  # mask invalid
+
+        # Chain to coords via bilinear sampling grads
+        grad_u_weighted = (grad_u_feat * grad_u).sum(dim=1)  # (N, H, W)
+        grad_v_weighted = (grad_u_feat * grad_v).sum(dim=1)  # (N, H, W)
+        grad_coords = torch.stack([grad_u_weighted, grad_v_weighted], dim=-1)  # (N, H, W, 2)
+
+        return residual, grad_coords
+
     def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn:
+        self._forward_calls += 1
         pose, dense_disp = variables["pose"], variables["dense_disp"]
+
         if optimize_intrinsics := self.intrinsics is None:
             intrinsics = variables["intrinsics"]
         else:
             intrinsics = self.intrinsics
+
         if optimize_rig := self.rig is None:
             rig = variables["rig"]
         else:
@@ -395,12 +500,18 @@ class EmbeddingSimilarityTerm(SolverTerm):
         assert intrinsics.shape[0] == rig.shape[0]
 
         camera_model_cls = self.camera_type.camera_model_cls()
+        # Guard scaling factor
+        scale = (
+            1.0 / self.intrinsics_factor
+            if (self.intrinsics_factor is not None and self.intrinsics_factor != 0.0)
+            else 1.0
+        )
 
         coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
             pose,
             dense_disp.view(-1, self.height, self.width),
             None,
-            (camera_model_cls(intrinsics).scaled(1.0 / self.intrinsics_factor).intrinsics),
+            (camera_model_cls(intrinsics).scaled(scale).intrinsics),
             self.camera_type,
             rig,
             self.pose_i_inds,
@@ -416,221 +527,464 @@ class EmbeddingSimilarityTerm(SolverTerm):
         coords = coords.view(self.n_terms, self.height, self.width, 2)
         valid = valid.view(self.n_terms, self.height, self.width, 1)
 
-        # Process in chunks to avoid OOM
-        residual_chunks = []
-        weight_chunks = []
-        if jacobian:
-            J_pose_i_chunks = []
-            J_pose_j_chunks = []
-            J_disp_chunks = []
-            if optimize_intrinsics:
-                J_intr_chunks = []
-            if optimize_rig:
-                J_rig_chunks = []
-
         pixel_count = self.height * self.width
+        device = pose.device
+        dtype = coords.dtype
 
+        # Pre-allocate outputs
+        residual = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
+        weight = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
+
+        if jacobian:
+            J_pose_i = torch.zeros(self.n_terms, pixel_count, 6, device=device, dtype=dtype)
+            J_pose_j = torch.zeros(self.n_terms, pixel_count, 6, device=device, dtype=dtype)
+            J_disp = torch.zeros(self.n_terms, pixel_count, 1, device=device, dtype=dtype)
+
+            if optimize_intrinsics:
+                intr_dim = Jfi.shape[-1]
+                J_intr = torch.zeros(2 * self.n_terms, pixel_count, intr_dim, device=device, dtype=dtype)
+            if optimize_rig:
+                J_rig = torch.zeros(2 * self.n_terms, pixel_count, 6, device=device, dtype=dtype)
+
+        # Chunk to save memory
         for chunk_start in range(0, self.n_terms, self.chunk_size):
             chunk_end = min(chunk_start + self.chunk_size, self.n_terms)
-            chunk_len = chunk_end - chunk_start
-            chunk_slice = slice(chunk_start, chunk_end)
+            cs = slice(chunk_start, chunk_end)
+            cs_offset = slice(chunk_start + self.n_terms, chunk_end + self.n_terms)
 
-            # Get chunk data
-            src_idx = self.dense_disp_i_inds[chunk_slice]
-            tgt_idx = self.dense_disp_j_inds[chunk_slice]
+            src_idx = self.dense_disp_i_inds[cs]
+            tgt_idx = self.dense_disp_j_inds[cs]
 
-            # Keep embeddings in original dtype (likely float16)
-            source_embeddings = self.embeddings[src_idx]
-            target_embeddings = self.embeddings[tgt_idx]
+            # Normalized source (no sampling)
+            source_norm = self.embeddings_norm[src_idx]  # (N, C, H, W)
 
-            coords_chunk = coords[chunk_slice]
-            valid_chunk = valid[chunk_slice]
+            # Target: raw features (will be normalized AFTER sampling)
+            target_raw_full = self.embeddings[tgt_idx]  # (N, C, H, W)
 
-            # Apply embedding valid mask
+            coords_chunk = coords[cs]  # (N, H, W, 2)
+            valid_chunk = valid[cs]  # (N, H, W, 1)
+
+            # Optional embedding validity masks (src & tgt)
             if self.embedding_valid_mask is not None:
-                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1).to(valid_chunk.dtype)
-                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1).to(valid_chunk.dtype)
+                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1)  # (N, H, W, 1)
+                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1)  # (N, H, W, 1)
                 valid_chunk = valid_chunk * src_valid * tgt_valid
 
-            valid_map = valid_chunk.permute(0, 3, 1, 2)
+            valid_map = valid_chunk.permute(0, 3, 1, 2)  # (N, 1, H, W)
 
-            weight_chunk = (self.embedding_weight * valid_map.squeeze(1)).view(chunk_len, pixel_count)
-            weight_chunks.append(weight_chunk)
+            # Per-pixel weight for this term
+            weight_chunk = self.embedding_weight * valid_map.squeeze(1)
+            weight[cs] = weight_chunk.view(-1, pixel_count)
 
-            # Skip heavy computation for edges that have no valid overlap.
-            valid_counts = valid_map.view(chunk_len, -1).sum(dim=1)
-            active_mask = valid_counts > 0.0
-
-            if not torch.any(active_mask):
-                residual_chunks.append(weight_chunk.new_zeros(chunk_len, pixel_count))
-
-                if jacobian:
-                    zero_pose = coords_chunk.new_zeros(chunk_len, pixel_count, 6)
-                    J_pose_i_chunks.append(zero_pose)
-                    J_pose_j_chunks.append(zero_pose.clone())
-                    J_disp_chunks.append(coords_chunk.new_zeros(chunk_len, pixel_count, 1))
-
-                    if optimize_intrinsics:
-                        intr_dim = Jfi.shape[-1]
-                        zero_intr = coords_chunk.new_zeros(chunk_len, pixel_count, intr_dim)
-                        J_intr_chunks.append(torch.cat([zero_intr, zero_intr.clone()], dim=0))
-
-                    if optimize_rig:
-                        zero_rig = coords_chunk.new_zeros(chunk_len, pixel_count, 6)
-                        J_rig_chunks.append(torch.cat([zero_rig, zero_rig.clone()], dim=0))
-
+            # Skip if fully invalid
+            if not torch.any(valid_map.view(-1, pixel_count).sum(dim=1) > 0.0):
                 continue
 
-            active_inds = torch.nonzero(active_mask, as_tuple=False).squeeze(-1)
-
-            source_embeddings_f32 = source_embeddings[active_inds].float()
-            target_embeddings_f32 = target_embeddings[active_inds].float()
-
-            coords_active = coords_chunk[active_inds]
-            valid_chunk_active = valid_chunk[active_inds]
-            valid_map_active = valid_map[active_inds]
-
-            # Bilinear sampling with gradients
-            target_samples, grad_u, grad_v = self.bilinear_sample_with_grad(
-                target_embeddings_f32, coords_active, return_grad=jacobian
+            # Bilinear sample raw target features (and spatial grads if needed)
+            target_raw_sampled, grad_u, grad_v = self.bilinear_sample_with_grad(
+                target_raw_full, coords_chunk, return_grad=jacobian
             )
 
-            # Apply valid mask before normalization
-            valid_mask_expanded = valid_map_active.expand_as(target_samples)
-            target_samples = target_samples * valid_mask_expanded
+            if jacobian:
+                residual_chunk, grad_coords = self.compute_residual_and_jacobian(
+                    source_norm, target_raw_sampled, grad_u, grad_v, valid_map
+                )
+            else:
+                # Residual only path
+                eps = 1e-8
+                u = target_raw_sampled
+                u_norm = u.norm(dim=1, keepdim=True).clamp_min(eps)
+                t_norm = u / u_norm
+                cos_sim = (source_norm * t_norm).sum(dim=1)
+                if self.use_photometric_residual:
+                    residual_chunk = self.residual_scale * torch.sqrt(2.0 * (1.0 - cos_sim).clamp(min=0.0))
+                else:
+                    residual_chunk = 1.0 - cos_sim
+                residual_chunk = residual_chunk * valid_map.squeeze(1)
 
-            # Normalize embeddings
-            source_norm = F.normalize(source_embeddings_f32, dim=1, eps=1e-8)
-            target_norm = F.normalize(target_samples, dim=1, eps=1e-8)
+            residual[cs] = residual_chunk.view(-1, pixel_count)
 
-            # Cosine similarity: dot product of normalized vectors
-            cos_sim = (source_norm * target_norm).sum(dim=1)  # (N, H, W)
-
-            # Residual: we want to minimize (1 - cos_sim), so residual = 1 - cos_sim
-            residual_map = (1.0 - cos_sim) * valid_map_active.squeeze(1)
-
-            residual_chunk = weight_chunk.new_zeros(chunk_len, pixel_count)
-            residual_chunk[active_inds] = residual_map.view(-1, pixel_count)
-            residual_chunks.append(residual_chunk)
+            if self.debug_visualize:
+                self._maybe_visualize_chunk(
+                    chunk_start=chunk_start,
+                    source_norm=source_norm,
+                    target_raw_sampled=target_raw_sampled,
+                    residual_chunk=residual_chunk,
+                    valid_map=valid_map,
+                    pose_i_inds=self.pose_i_inds[cs],
+                    pose_j_inds=self.pose_j_inds[cs],
+                    dense_i_inds=self.dense_disp_i_inds[cs],
+                    dense_j_inds=self.dense_disp_j_inds[cs],
+                )
 
             if jacobian:
-                # Compute gradient of loss w.r.t. unnormalized target samples
-                # Loss = 1 - cos_sim = 1 - (S_norm · T_norm)
-                # where S_norm = S/|S|, T_norm = T/|T|
-                #
-                # For normalized vectors, the gradient w.r.t. unnormalized T is:
-                # d/dT [1 - (S_norm · T_norm)] = -d/dT [(S_norm · T_norm)]
-                #
-                # Using chain rule through normalization:
-                # d/dT [S_norm · T_norm] = (I - T_norm @ T_norm^T) / |T| @ S_norm
-                #                        = (S_norm - (S_norm · T_norm) * T_norm) / |T|
-                #                        = (S_norm - cos_sim * T_norm) / |T|
-                #
-                # So: d/dT [1 - cos_sim] = -(S_norm - cos_sim * T_norm) / |T|
-                norm_t = target_samples.norm(dim=1, keepdim=True).clamp(min=1e-8)
-                grad_t = -(source_norm - cos_sim.unsqueeze(1) * target_norm) / norm_t
-                grad_t = grad_t * valid_mask_expanded
-
-                # Chain rule: gradient w.r.t. coordinates
-                # d/dcoords = d/dT * dT/dcoords
-                grad_u_weighted = (grad_t * grad_u).sum(dim=1) * valid_map_active.squeeze(1)
-                grad_v_weighted = (grad_t * grad_v).sum(dim=1) * valid_map_active.squeeze(1)
-                grad_coords = torch.stack([grad_u_weighted, grad_v_weighted], dim=-1)
                 grad_coords_flat = grad_coords.view(-1, pixel_count, 2)
 
-                # Jacobians
-                Ji_active = Ji[chunk_slice][active_inds].view(-1, pixel_count, 2, 6)
-                Jj_active = Jj[chunk_slice][active_inds].view(-1, pixel_count, 2, 6)
-                Jz_active = Jz[chunk_slice][active_inds].view(-1, pixel_count, 2, 1)
+                Ji_chunk = Ji[cs].view(-1, pixel_count, 2, 6)
+                Jj_chunk = Jj[cs].view(-1, pixel_count, 2, 6)
+                Jz_chunk = Jz[cs].view(-1, pixel_count, 2, 1)
 
-                chunk_J_pose_i = coords_chunk.new_zeros(chunk_len, pixel_count, 6)
-                chunk_J_pose_j = coords_chunk.new_zeros(chunk_len, pixel_count, 6)
-                chunk_J_disp = coords_chunk.new_zeros(chunk_len, pixel_count, 1)
-
-                chunk_J_pose_i[active_inds] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Ji_active)
-                chunk_J_pose_j[active_inds] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jj_active)
-                chunk_J_disp[active_inds] = torch.einsum("nkd,nkdc->nkc", grad_coords_flat, Jz_active)
-
-                J_pose_i_chunks.append(chunk_J_pose_i)
-                J_pose_j_chunks.append(chunk_J_pose_j)
-                J_disp_chunks.append(chunk_J_disp)
+                J_pose_i[cs] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Ji_chunk)
+                J_pose_j[cs] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jj_chunk)
+                J_disp[cs] = torch.einsum("nkd,nkdc->nkc", grad_coords_flat, Jz_chunk)
 
                 if optimize_intrinsics:
                     intr_dim = Jfi.shape[-1]
-                    Jfi_active = Jfi[chunk_slice][active_inds].view(-1, pixel_count, 2, intr_dim)
-                    Jfj_active = Jfj[chunk_slice][active_inds].view(-1, pixel_count, 2, intr_dim)
-
-                    chunk_J_intr_i = coords_chunk.new_zeros(chunk_len, pixel_count, intr_dim)
-                    chunk_J_intr_j = coords_chunk.new_zeros(chunk_len, pixel_count, intr_dim)
-
-                    chunk_J_intr_i[active_inds] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfi_active)
-                    chunk_J_intr_j[active_inds] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfj_active)
-
-                    J_intr_chunks.append(torch.cat([chunk_J_intr_i, chunk_J_intr_j], dim=0))
+                    Jfi_chunk = Jfi[cs].view(-1, pixel_count, 2, intr_dim)
+                    Jfj_chunk = Jfj[cs].view(-1, pixel_count, 2, intr_dim)
+                    J_intr[cs] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfi_chunk)
+                    J_intr[cs_offset] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jfj_chunk)
 
                 if optimize_rig:
-                    Jri_active = Jri[chunk_slice][active_inds].view(-1, pixel_count, 2, 6)
-                    Jrj_active = Jrj[chunk_slice][active_inds].view(-1, pixel_count, 2, 6)
+                    Jri_chunk = Jri[cs].view(-1, pixel_count, 2, 6)
+                    Jrj_chunk = Jrj[cs].view(-1, pixel_count, 2, 6)
+                    J_rig[cs] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jri_chunk)
+                    J_rig[cs_offset] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jrj_chunk)
 
-                    chunk_J_rig_i = coords_chunk.new_zeros(chunk_len, pixel_count, 6)
-                    chunk_J_rig_j = coords_chunk.new_zeros(chunk_len, pixel_count, 6)
-
-                    chunk_J_rig_i[active_inds] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jri_active)
-                    chunk_J_rig_j[active_inds] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jrj_active)
-
-                    J_rig_chunks.append(torch.cat([chunk_J_rig_i, chunk_J_rig_j], dim=0))
-
-        # Concatenate results
-        residual = torch.cat(residual_chunks, dim=0)
-        weight = torch.cat(weight_chunks, dim=0)
-
+        # Assemble sparse Jacobians
         J_dict = {}
         if jacobian:
-            term_inds = torch.arange(self.n_terms, device=pose.device)
-
-            J_pose_i = torch.cat(J_pose_i_chunks, dim=0)
-            J_pose_j = torch.cat(J_pose_j_chunks, dim=0)
-            J_disp = torch.cat(J_disp_chunks, dim=0)
-
+            term_inds = torch.arange(self.n_terms, device=device)
             J_dict = {
                 "pose": SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
                     j_inds=torch.cat([self.pose_i_inds, self.pose_j_inds]),
-                    data=torch.cat(
-                        [
-                            J_pose_i.view(self.n_terms, -1, 6),
-                            J_pose_j.view(self.n_terms, -1, 6),
-                        ],
-                        dim=0,
-                    ),
+                    data=torch.cat([J_pose_i, J_pose_j], dim=0),
                 ),
                 "dense_disp": SparseMDiagonalBlockMatrix(
                     i_inds=term_inds,
                     j_inds=self.dense_disp_i_inds,
-                    data=J_disp.view(self.n_terms, -1, 1),
+                    data=J_disp,
                 ),
             }
-
             if optimize_intrinsics:
-                J_intr = torch.cat(J_intr_chunks, dim=0)
                 J_dict["intrinsics"] = SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
-                    data=camera_model_cls.J_scale(
-                        1.0 / self.intrinsics_factor,
-                        J_intr,
-                    ),
+                    data=camera_model_cls.J_scale(scale, J_intr),
                 )
-
             if optimize_rig:
-                J_rig = torch.cat(J_rig_chunks, dim=0)
                 J_dict["rig"] = SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=J_rig,
                 )
 
+        if self.debug_enabled and self.debug_log_stats and self._should_debug_this_call():
+            self._log_debug_stats(residual=residual, weight=weight)
         return ConcreteTermEvalReturn(J=J_dict, w=weight, r=residual)
+
+    def _should_debug_this_call(self) -> bool:
+        return ((self._forward_calls - 1) % self.debug_log_every) == 0
+
+    def _log_debug_stats(self, residual: torch.Tensor, weight: torch.Tensor) -> None:
+        valid_mask = weight > 0
+        total = int(valid_mask.numel())
+        valid = int(valid_mask.sum().item())
+        if valid == 0:
+            logger.info("[EmbeddingSim] call=%d | valid pixels: 0 / %d -- skipping stats", self._forward_calls, total)
+            return
+        residual_valid = residual[valid_mask]
+        mean = residual_valid.mean().item()
+        std = residual_valid.std(unbiased=False).item()
+        min_val = residual_valid.min().item()
+        max_val = residual_valid.max().item()
+        logger.info(
+            (
+                "[EmbeddingSim] call=%d | valid=%d/%d (%.2f%%) "
+                "residual mean=%.4f std=%.4f min=%.4f max=%.4f weight=%.4f photometric=%s"
+            ),
+            self._forward_calls,
+            valid,
+            total,
+            100.0 * valid / total,
+            mean,
+            std,
+            min_val,
+            max_val,
+            float(self.embedding_weight),
+            self.use_photometric_residual,
+        )
+
+    def _maybe_visualize_chunk(
+        self,
+        *,
+        chunk_start: int,
+        source_norm: torch.Tensor,
+        target_raw_sampled: torch.Tensor,
+        residual_chunk: torch.Tensor,
+        valid_map: torch.Tensor,
+        pose_i_inds: torch.Tensor,
+        pose_j_inds: torch.Tensor,
+        dense_i_inds: torch.Tensor,
+        dense_j_inds: torch.Tensor,
+    ) -> None:
+        if (
+            not self.debug_visualize
+            or self.debug_dir is None
+            or self._debug_saved >= self.debug_max_snapshots
+            or not self._should_debug_this_call()
+        ):
+            return
+
+        chunk_size = source_norm.shape[0]
+        captures = 0
+        for local_idx in range(chunk_size):
+            if captures >= self.debug_samples_per_snapshot or self._debug_saved >= self.debug_max_snapshots:
+                break
+
+            validity = valid_map[local_idx, 0] > 0.5
+            if not torch.any(validity):
+                continue
+
+            global_idx = chunk_start + local_idx
+            self._save_debug_snapshot(
+                global_idx=global_idx,
+                source_norm=source_norm[local_idx],
+                target_raw_sampled=target_raw_sampled[local_idx],
+                residual_map=residual_chunk[local_idx],
+                valid_mask=validity,
+                pose_i=int(pose_i_inds[local_idx].item()),
+                pose_j=int(pose_j_inds[local_idx].item()),
+                dense_i=int(dense_i_inds[local_idx].item()),
+                dense_j=int(dense_j_inds[local_idx].item()),
+            )
+            captures += 1
+
+    def _save_debug_snapshot(
+        self,
+        *,
+        global_idx: int,
+        source_norm: torch.Tensor,
+        target_raw_sampled: torch.Tensor,
+        residual_map: torch.Tensor,
+        valid_mask: torch.Tensor,
+        pose_i: int,
+        pose_j: int,
+        dense_i: int,
+        dense_j: int,
+    ) -> None:
+        if self.debug_dir is None:
+            return
+
+        target_norm = F.normalize(target_raw_sampled.unsqueeze(0), dim=1, eps=1e-8).squeeze(0)
+        cos_map = (source_norm * target_norm).sum(dim=0)
+
+        valid_ratio = float(valid_mask.float().mean().item())
+        cos_valid = cos_map[valid_mask]
+        res_valid = residual_map[valid_mask]
+        cos_mean = float(cos_valid.mean().item()) if cos_valid.numel() > 0 else float("nan")
+        res_mean = float(res_valid.mean().item()) if res_valid.numel() > 0 else float("nan")
+
+        panel = self._compose_debug_panel(
+            source_norm=source_norm,
+            target_norm=target_norm,
+            cos_map=cos_map,
+            residual_map=residual_map,
+            valid_mask=valid_mask,
+        )
+        text = (
+            f"term#{global_idx} pose {pose_i}->{pose_j} disp {dense_i}->{dense_j} "
+            f"valid {valid_ratio * 100:.1f}% cos {cos_mean:.3f} res {res_mean:.3f}"
+        )
+        image = self._attach_header(panel, text)
+        filename = self.debug_dir / f"call{self._forward_calls:04d}_term{global_idx:05d}.png"
+        self._write_debug_image(filename, image)
+        logger.info(
+            "EmbeddingSimilarityTerm snapshot saved to %s (pose %d->%d, disp %d->%d, valid %.1f%%, cos %.3f, res %.3f)",
+            filename,
+            pose_i,
+            pose_j,
+            dense_i,
+            dense_j,
+            valid_ratio * 100.0,
+            cos_mean,
+            res_mean,
+        )
+        self._debug_saved += 1
+
+    def _compose_debug_panel(
+        self,
+        *,
+        source_norm: torch.Tensor,
+        target_norm: torch.Tensor,
+        cos_map: torch.Tensor,
+        residual_map: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> np.ndarray:
+        import cv2
+        import numpy as np
+
+        # --- Create the 4 base images ---
+        src_rgb = self._tensor_to_rgb(source_norm)
+        tgt_rgb = self._tensor_to_rgb(target_norm)
+        cos_heat = self._tensor_to_heatmap(
+            cos_map,
+            vmin=-1.0,
+            vmax=1.0,
+            colormap="viridis",
+            valid_mask=valid_mask,
+        )
+        residual_vmax = self.residual_scale * 2.0 if self.use_photometric_residual else 2.0
+        res_heat = self._tensor_to_heatmap(
+            residual_map,
+            vmin=0.0,
+            vmax=max(residual_vmax, 1e-6),
+            colormap="turbo",
+            valid_mask=valid_mask,
+        )
+
+        # --- Add titles to each image ---
+        src_rgb_titled = self._add_title_to_image(src_rgb, "Source (Normalized)")
+        tgt_rgb_titled = self._add_title_to_image(tgt_rgb, "Target (Sampled, Norm.)")
+        cos_heat_titled = self._add_title_to_image(cos_heat, "Cosine Similarity")
+        res_heat_titled = self._add_title_to_image(res_heat, "Residual (Error)")
+
+        # --- Concatenate titled images ---
+        top = np.concatenate([src_rgb_titled, tgt_rgb_titled], axis=1)
+        bottom = np.concatenate([cos_heat_titled, res_heat_titled], axis=1)
+        panel = np.concatenate([top, bottom], axis=0)
+
+        # --- NEW RESIZING LOGIC ---
+        # Define a target width for the final panel for better visibility
+        target_width = 1280
+
+        original_height, original_width, _ = panel.shape
+
+        # Only scale up if the panel is smaller than the target width
+        if original_width < target_width:
+            scale_factor = target_width / original_width
+            target_height = int(original_height * scale_factor)
+
+            # Resize the entire panel using INTER_NEAREST to keep pixels sharp
+            panel = cv2.resize(panel, (target_width, target_height), interpolation=cv2.INTER_NEAREST)
+
+        return panel
+
+    @staticmethod
+    def _add_title_to_image(image: np.ndarray, title: str) -> np.ndarray:
+        """Helper to put a small title on an image quadrant."""
+        import cv2
+        import numpy as np
+
+        title_height = 25  # Small header for each sub-image
+        h, w, c = image.shape
+
+        # Create a black header bar
+        header = np.zeros((title_height, w, c), dtype=np.uint8)
+
+        # Put white text on it
+        cv2.putText(
+            header,
+            title,
+            (5, title_height - 7),  # Position text
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,  # Font scale
+            (255, 255, 255),  # White color
+            1,
+            cv2.LINE_AA,
+        )
+        # Stack the title bar on top of the image
+        return np.concatenate([header, image], axis=0)
+
+    @staticmethod
+    def _tensor_to_rgb(tensor: torch.Tensor) -> np.ndarray:
+        if tensor.dim() != 3:
+            raise ValueError("Expected (C, H, W) tensor for RGB conversion")
+        c, h, w = tensor.shape
+        if c < 3:
+            pad = torch.zeros(3 - c, h, w, device=tensor.device, dtype=tensor.dtype)
+            tensor = torch.cat([tensor, pad], dim=0)
+        rgb = tensor[:3].detach().cpu()
+        rgb = (rgb * 0.5 + 0.5).clamp(0.0, 1.0)
+        rgb = rgb.permute(1, 2, 0).numpy()
+        return (rgb * 255.0).astype(np.uint8)
+
+    @staticmethod
+    def _tensor_to_heatmap(
+        tensor: torch.Tensor,
+        *,
+        vmin: float,
+        vmax: float,
+        colormap: str,
+        valid_mask: torch.Tensor,
+    ) -> np.ndarray:
+        import cv2
+
+        arr = tensor.detach().cpu().numpy()
+        span = max(vmax - vmin, 1e-6)
+        norm = np.clip((arr - vmin) / span, 0.0, 1.0)
+        img = (norm * 255.0).astype(np.uint8)
+        cmap = getattr(cv2, f"COLORMAP_{colormap.upper()}", cv2.COLORMAP_VIRIDIS)
+        colored = cv2.applyColorMap(img, cmap)
+        colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+        mask_np = valid_mask.detach().cpu().numpy().astype(bool)
+        colored[~mask_np] = np.array([30, 30, 30], dtype=np.uint8)
+        return colored
+
+    @staticmethod
+    def _attach_header(image: np.ndarray, text: str) -> np.ndarray:
+        import cv2
+        import numpy as np
+
+        header_height = 40  # Increased height for clarity
+        header = np.ones((header_height, image.shape[1], 3), dtype=np.uint8) * 255
+        img_width = image.shape[1]
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7  # Start with a larger, clearer font
+        thickness = 1
+
+        # --- Dynamic Font Scaling ---
+        # Get text size
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+
+        # Reduce font scale until text fits within image width (with 10px padding)
+        while text_width > (img_width - 10) and font_scale > 0.2:
+            font_scale -= 0.05
+            (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+
+        # --- Centering Text ---
+        # Vertically center text in the header
+        text_y = (header_height + text_height) // 2
+        text_x = 5  # Left-align with 5px margin
+
+        cv2.putText(
+            header,
+            text,
+            (text_x, text_y),  # Use calculated position
+            font,
+            font_scale,
+            (0, 0, 0),  # Black text
+            thickness,
+            cv2.LINE_AA,
+        )
+        return np.concatenate([header, image], axis=0)
+
+    @staticmethod
+    def _write_debug_image(path: Path, image: np.ndarray) -> None:
+        import imageio.v2 as imageio_v2
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        imageio_v2.imwrite(str(path), image)
+
+    @staticmethod
+    def _parse_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("", "none", "null"):
+                return default
+            return lowered in ("1", "true", "yes", "on")
+        return bool(value)
+
+    @staticmethod
+    def _parse_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
 
 class DispSensRegularizationTerm(SolverTerm):

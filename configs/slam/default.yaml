@@ -47,6 +47,15 @@ keyframe_depth: metric3d-small
 
 ba:
   dense_disp_alpha: 0.001
+  embedding_weight: 0.001
+  embedding_debug:
+    enabled: true
+    log_every: 1
+    log_stats: true
+    save_heatmaps: true
+    samples_per_snapshot: 1
+    max_snapshots: 100
+    output_dir: vipe_results/debug_embedding
   embedding_weight: 0.0
 
 sparse_tracks:
