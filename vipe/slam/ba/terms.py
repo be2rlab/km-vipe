@@ -94,6 +94,9 @@ class SolverTerm(ABC):
     @abstractmethod
     def group_names(self) -> set[str]: ...
 
+    def is_active(self) -> bool:
+        return True
+
     def update(self, solver):
         # Default implementation do nothing.
         pass
@@ -281,7 +284,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
         dense_disp_i_inds: torch.Tensor,
         dense_disp_j_inds: torch.Tensor,
         embeddings: torch.Tensor,
-        weight: float,
+        weight: torch.Tensor | float,
         image_size: tuple[int, int],
         camera_type: CameraType,
         embedding_valid_mask: torch.Tensor | None = None,
@@ -289,8 +292,8 @@ class EmbeddingSimilarityTerm(SolverTerm):
         intrinsics_factor: float = 8.0,
         rig: SE3 | None = None,
         chunk_size: int = 4,
-        residual_scale: float = 2.0,
-        use_photometric_residual: bool = True,
+        residual_scale: float = 1.0,
+        use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -324,15 +327,14 @@ class EmbeddingSimilarityTerm(SolverTerm):
                 f"embedding_valid_mask spatial dims {embedding_valid_mask.shape[1:]} must match image_size {image_size}"
             )
 
-        self.embedding_weight = weight
-        self.chunk_size = chunk_size
-        self.residual_scale = residual_scale
-        self.use_photometric_residual = use_photometric_residual
-
         self.image_size = image_size
         self.height, self.width = image_size
         assert embeddings.shape[2] == self.height and embeddings.shape[3] == self.width
         self.embedding_dim = embeddings.shape[1]
+        self.embedding_weight, self._has_weight_map = self._prepare_embedding_weight(weight)
+        self.chunk_size = chunk_size
+        self.residual_scale = residual_scale
+        self.use_photometric_residual = use_photometric_residual
 
         self.intrinsics = intrinsics.reshape(-1, 4) if intrinsics is not None else None
         self.intrinsics_factor = intrinsics_factor
@@ -354,6 +356,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
             self.debug_dir.mkdir(parents=True, exist_ok=True)
         self._forward_calls = 0
         self._debug_saved = 0
+        self._active = True
 
     def group_names(self) -> set[str]:
         names = {"pose", "dense_disp"}
@@ -362,6 +365,12 @@ class EmbeddingSimilarityTerm(SolverTerm):
         if self.rig is None:
             names.add("rig")
         return names
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+
+    def is_active(self) -> bool:
+        return self._active
 
     @staticmethod
     def bilinear_sample_with_grad(
@@ -461,7 +470,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
         else:
             # r = 1 - c
             residual = 1.0 - cos_sim
-            grad_scale = -1.0
+            grad_scale = cos_sim.new_full(cos_sim.shape, -1.0)
 
         # Mask residuals
         residual = residual * valid_map.squeeze(1)
@@ -573,7 +582,11 @@ class EmbeddingSimilarityTerm(SolverTerm):
             valid_map = valid_chunk.permute(0, 3, 1, 2)  # (N, 1, H, W)
 
             # Per-pixel weight for this term
-            weight_chunk = self.embedding_weight * valid_map.squeeze(1)
+            if self._has_weight_map:
+                base_weight = self.embedding_weight[cs]
+            else:
+                base_weight = self.embedding_weight
+            weight_chunk = base_weight * valid_map.squeeze(1)
             weight[cs] = weight_chunk.view(-1, pixel_count)
 
             # Skip if fully invalid
@@ -674,6 +687,39 @@ class EmbeddingSimilarityTerm(SolverTerm):
             self._log_debug_stats(residual=residual, weight=weight)
         return ConcreteTermEvalReturn(J=J_dict, w=weight, r=residual)
 
+    def _prepare_embedding_weight(self, weight: torch.Tensor | float) -> tuple[torch.Tensor, bool]:
+        device = self.embeddings.device
+        dtype = self.embeddings.dtype
+        if isinstance(weight, torch.Tensor):
+            weight_tensor = weight.detach().to(device=device, dtype=dtype)
+            if weight_tensor.ndim == 0:
+                return weight_tensor, False
+            if weight_tensor.ndim == 2:
+                expected = (self.n_terms, self.height * self.width)
+                if weight_tensor.shape != expected:
+                    raise ValueError(
+                        f"Embedding weight tensor must have shape {expected} when 2D, got {tuple(weight_tensor.shape)}"
+                    )
+                return weight_tensor.view(self.n_terms, self.height, self.width).contiguous(), True
+            if weight_tensor.ndim == 3:
+                if tuple(weight_tensor.shape[1:]) != (self.height, self.width):
+                    raise ValueError(
+                        "Embedding weight spatial shape must match image_size; got "
+                        f"{tuple(weight_tensor.shape[1:])} vs {(self.height, self.width)}"
+                    )
+                if weight_tensor.shape[0] == 1 and self.n_terms > 1:
+                    weight_tensor = weight_tensor.expand(self.n_terms, -1, -1)
+                elif weight_tensor.shape[0] != self.n_terms:
+                    raise ValueError(
+                        f"Embedding weight batch dimension must be 1 or {self.n_terms}; got {weight_tensor.shape[0]}"
+                    )
+                return weight_tensor.contiguous(), True
+            raise ValueError(
+                "Embedding weight tensor must be scalar, (n_terms, H*W), or (n_terms, H, W); "
+                f"got ndim={weight_tensor.ndim}"
+            )
+        return torch.tensor(float(weight), device=device, dtype=dtype), False
+
     def _should_debug_this_call(self) -> bool:
         return ((self._forward_calls - 1) % self.debug_log_every) == 0
 
@@ -689,6 +735,10 @@ class EmbeddingSimilarityTerm(SolverTerm):
         std = residual_valid.std(unbiased=False).item()
         min_val = residual_valid.min().item()
         max_val = residual_valid.max().item()
+        if self._has_weight_map:
+            weight_value = float(self.embedding_weight.mean().item())
+        else:
+            weight_value = float(self.embedding_weight.item())
         logger.info(
             (
                 "[EmbeddingSim] call=%d | valid=%d/%d (%.2f%%) "
@@ -702,7 +752,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
             std,
             min_val,
             max_val,
-            float(self.embedding_weight),
+            weight_value,
             self.use_photometric_residual,
         )
 

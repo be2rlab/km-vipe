@@ -48,8 +48,9 @@ keyframe_depth: metric3d-small
 ba:
   dense_disp_alpha: 0.001
   embedding_weight: 0.001
+  # embedding_fine_iters: 4  # number of final BA iterations that include embedding term
   embedding_debug:
-    enabled: true
+    enabled: false
     log_every: 1
     log_stats: true
     save_heatmaps: true
