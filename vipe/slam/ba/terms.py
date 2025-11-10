@@ -60,6 +60,7 @@ class ConcreteTermEvalReturn(TermEvalReturn):
     J: dict[str, SparseBlockMatrix]  # group_name -> (n_occ, res_dim, manifold_dim)
     w: torch.Tensor  # (n_terms, res_dim, )
     r: torch.Tensor  # (n_terms, res_dim, )
+    alpha: torch.Tensor | None = None
 
     # n_occ = number of occurrences of this group_name in all the terms.
     # i.e. the number of blocks in the sparse Jacobian matrix with size n_terms x n_vars
@@ -80,7 +81,7 @@ class ConcreteTermEvalReturn(TermEvalReturn):
         self.J[group_name] = j_group.subset(keep_mask)
 
     def apply_robust_kernel(self, kernel: RobustKernel):
-        robust_weight = kernel.apply(self.r)
+        robust_weight = kernel.apply(self.r,self.alpha)
         self.w = self.w * robust_weight
 
     def residual(self) -> torch.Tensor:
@@ -149,6 +150,7 @@ class DenseDepthFlowTerm(SolverTerm):
         self.intrinsics = intrinsics.reshape(-1, 4) if intrinsics is not None else None  # (Q, 4)
         self.intrinsics_factor = intrinsics_factor
         self.rig = rig
+        self.alpha = None
 
     def group_names(self) -> set[str]:
         names = {"pose", "dense_disp"}
@@ -243,11 +245,22 @@ class DenseDepthFlowTerm(SolverTerm):
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
+
+        self.compute_embedding_residuals()
+        self.calculate_alpha()
         return ConcreteTermEvalReturn(
             J=J_dict,
             w=weight,
             r=rearrange(coords - self.target, "n hw c -> n (hw c)", c=2),
+            alpha = self.alpha
         )
+    
+    
+    def compute_embedding_residuals(self):
+        pass
+
+    def calculate_alpha(self):
+        pass 
 
 
 class EmbeddingSimilarityTerm(SolverTerm):
