@@ -230,7 +230,7 @@ class VideoFrame:
             new_features = (
                 torch.nn.functional.interpolate(feat_for_interp, size, mode="bilinear").squeeze(0).permute(1, 2, 0)
             )  # Back to (H_new, W_new, C)
-
+            del feat_for_interp
         return VideoFrame(
             raw_frame_idx=self.raw_frame_idx,
             rgb=new_rgb,

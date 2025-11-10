@@ -150,7 +150,6 @@ class PyramidUpsampler:
             raise ValueError("Empty feature pyramid")
 
         D = features_pyramid[0].shape[-1]
-        print(f"inside upsample pyramid {D}")
 
         # Use the same device as input features
         device = features_pyramid[0].device

@@ -79,7 +79,6 @@ class PyramidUpsampler:
             raise ValueError("Empty feature pyramid")
 
         D = features_pyramid[0].shape[-1]
-        print(f"inside upsample pyramid {D}")
 
         # Use the same device as input features
         device = features_pyramid[0].device
@@ -531,7 +530,7 @@ class DINOv3EmbeddingEngine:
 
         _, base_h, base_w = base_tensor.shape
         features_pyramid = []
-        print(f"  Multi-scale feature extraction (Base: {base_h}x{base_w}, Scales: {scales}):")
+        # print(f"  Multi-scale feature extraction (Base: {base_h}x{base_w}, Scales: {scales}):")
 
         amp_dtype = torch.bfloat16 if self.device == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
 

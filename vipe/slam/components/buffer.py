@@ -19,13 +19,14 @@
 # -------------------------------------------------------------------------------------------------
 
 import logging
+from typing import Any
 
 import numpy as np
 import rerun as rr
 import torch
 
 from einops import rearrange
-from omegaconf.dictconfig import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from vipe.ext import slam_ext
 from vipe.ext.lietorch import SE3
@@ -73,6 +74,15 @@ class GraphBuffer:
         self.ba_config = ba_config
         self.sparse_tracks = sparse_tracks
         self.camera_type = camera_type
+        embedding_debug_cfg = getattr(self.ba_config, "embedding_debug", None)
+        self.embedding_debug_options: dict[str, Any] | None = None
+        if embedding_debug_cfg not in (None, "null"):
+            if isinstance(embedding_debug_cfg, DictConfig):
+                self.embedding_debug_options = OmegaConf.to_container(embedding_debug_cfg, resolve=True)
+            elif isinstance(embedding_debug_cfg, dict):
+                self.embedding_debug_options = dict(embedding_debug_cfg)
+            else:
+                self.embedding_debug_options = {"enabled": bool(embedding_debug_cfg)}
 
         assert self.height % 8 == 0 and self.width % 8 == 0
 
@@ -501,6 +511,7 @@ class GraphBuffer:
                     rig=None,
                     image_size=(self.height // 8, self.width // 8),
                     camera_type=self.camera_type,
+                    debug_options=self.embedding_debug_options,
                 )
             )
 

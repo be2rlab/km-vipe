@@ -180,6 +180,7 @@ class EmbeddingsPipeline:
                 self.projector.fit(feats)
 
             codes = self.projector.encode(feats)  # (H, W, K)
+            del feats
             self.engine.visualize_embeddings(
                 codes,
                 method="naive_rgb",
