@@ -92,89 +92,113 @@ class ResizeTransform(nn.Module):
 
 
 class PyramidUpsampler:
-    """Multi-scale feature upsampling & blending.
-
-    Supports input feature shapes:
-      • [H, W, D]
-      • [B, H, W, D]
-    """
+    """Handles multi-scale feature upsampling with different blending strategies."""
 
     def __init__(
         self,
         scales: Optional[List[float]] = None,
         blend_mode: Literal["weighted", "average", "max"] = "weighted",
-        device: Optional[str] = None,
+        device: str = "cuda",
     ):
         self.scales = scales or [1.0, 0.75, 0.5]
         self.blend_mode = blend_mode
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-
-    @staticmethod
-    def _to_nchw(x: Tensor) -> Tensor:
-        # [H,W,D] -> [1,D,H,W], [B,H,W,D] -> [B,D,H,W]
-        if x.dim() == 3:
-            return x.permute(2, 0, 1).unsqueeze(0)
-        elif x.dim() == 4:
-            return x.permute(0, 3, 1, 2)
-        else:
-            raise ValueError("Expected feature dims 3 or 4")
-
-    @staticmethod
-    def _from_nchw(x: Tensor, batched: bool) -> Tensor:
-        # [1,D,H,W] -> [H,W,D], [B,D,H,W] -> [B,H,W,D]
-        if batched:
-            return x.permute(0, 2, 3, 1).contiguous()
-        else:
-            return x.squeeze(0).permute(1, 2, 0).contiguous()
+        self.device = device
 
     def upsample_single_scale(
         self,
         features: Tensor,
-        target_size: Tuple[int, int],  # (H, W)
+        target_size: Tuple[int, int],
         mode: Literal["bilinear", "bicubic"] = "bilinear",
     ) -> Tensor:
-        batched = features.dim() == 4
-        x = self._to_nchw(features)
-        kwargs = {"size": target_size, "mode": mode}
-        if mode == "bilinear":  # only valid for some modes
-            kwargs["align_corners"] = False
-        out = F.interpolate(x, **kwargs)
-        return self._from_nchw(out, batched)
+        """Upsample features to target size using single-scale interpolation."""
+        device = features.device
+        h, w = features.shape[:2] if features.dim() == 3 else features.shape[2:4]
+
+        if (h, w) == target_size:
+            return features if features.dim() == 3 else features.squeeze(0).permute(1, 2, 0)
+
+        if features.dim() == 3:
+            features = features.permute(2, 0, 1).unsqueeze(0)  # [1, D, H, W]
+
+        interp_kwargs = {"size": target_size, "mode": mode, "antialias": True}
+        if mode == "bilinear":
+            interp_kwargs["align_corners"] = False
+
+        upsampled = F.interpolate(features, **interp_kwargs)
+        del features
+
+        result = upsampled.squeeze(0).permute(1, 2, 0)
+        if result.is_contiguous():
+            result = result.contiguous()
+
+        del upsampled
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        return result
 
     def upsample_pyramid(self, features_pyramid: List[Tensor], target_size: Tuple[int, int]) -> Tensor:
+        """
+        Upsample and blend pyramid features.
+        Args:
+            features_pyramid: List of [H_i, W_i, D] tensors at different scales
+            target_size: (H_target, W_target) final resolution
+        Returns:
+            Blended features: [H_target, W_target, D]
+        """
         if not features_pyramid:
             raise ValueError("Empty feature pyramid")
 
-        first = features_pyramid[0]
-        batched = first.dim() == 4
-        if batched:
-            B = first.shape[0]
-            Ht, Wt, D = target_size[0], target_size[1], first.shape[-1]
-            acc = torch.zeros(B, Ht, Wt, D, device=self.device)
-            wts = torch.zeros(B, Ht, Wt, 1, device=self.device)
-        else:
-            Ht, Wt, D = target_size[0], target_size[1], first.shape[-1]
-            acc = torch.zeros(Ht, Wt, D, device=self.device)
-            wts = torch.zeros(Ht, Wt, 1, device=self.device)
+        D = features_pyramid[0].shape[-1]
+        print(f"inside upsample pyramid {D}")
 
-        mode = self.blend_mode
+        # Use the same device as input features
+        device = features_pyramid[0].device
+
+        # Initialize accumulators
+        accumulated = torch.zeros(target_size[0], target_size[1], D, device=device)
+        weights = (
+            torch.zeros(target_size[0], target_size[1], 1, device=device)
+            if self.blend_mode in ["weighted", "average"]
+            else None
+        )
         for i, feats in enumerate(features_pyramid):
-            up = self.upsample_single_scale(feats, target_size, mode="bilinear")
-            if mode == "weighted":
-                w = self.scales[i] if i < len(self.scales) else 1.0
-                acc = acc + up * w
-                wts = wts + w
-            elif mode == "average":
-                acc = acc + up
-                wts = wts + 1.0
-            elif mode == "max":
-                acc = up if i == 0 else torch.maximum(acc, up)
-            else:
-                raise ValueError(f"Unknown blend mode: {mode}")
+            upsampled = self.upsample_single_scale(feats, target_size, mode="bilinear")
 
-        if mode in ("weighted", "average"):
-            return acc / (wts + 1e-8)
-        return acc
+            current_blend_mode = self.blend_mode
+
+            if current_blend_mode == "weighted":
+                scale_weight = self.scales[i] if i < len(self.scales) else 1.0
+                accumulated.add_(upsampled, alpha=scale_weight)
+                weights.add_(scale_weight)
+
+            elif current_blend_mode == "average":
+                accumulated.add_(upsampled)
+                weights.add_(1.0)
+
+            elif current_blend_mode == "max":
+                if i == 0:
+                    accumulated = upsampled.clone()
+                else:
+                    torch.maximum(accumulated, upsampled, out=accumulated)
+            else:
+                raise ValueError(f"Unknown blend mode: {current_blend_mode}")
+
+            del upsampled
+
+            if device.type == "cuda" and (i + 1) % 3 == 0:
+                torch.cuda.empty_cache()
+
+        if current_blend_mode in ["weighted", "average"]:
+            result = accumulated.div_(weights + 1e-8)
+            del weights
+        else:
+            result = accumulated
+
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        return result
 
 
 class DINOv2EmbeddingEngine:

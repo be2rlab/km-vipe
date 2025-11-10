@@ -11,13 +11,15 @@ class EmbeddingsPipeline:
 
     def __init__(
         self,
-        model_variant: DinoV3Variant = DinoV3Variant.VITHP,
+        model_variant: DinoV3Variant = DinoV3Variant.VITSP,
         weights_dir: str | None = None,
     ) -> None:
         if weights_dir is None:
             weights_dir = "/home/user/km-vipe/weights/dinov3"
 
-        self.engine = DINOv3EmbeddingEngine(model=model_variant, weights_dir=weights_dir)
+        self.engine = DINOv3EmbeddingEngine(
+            model=model_variant, weights_dir=weights_dir, pyramid_scales=[2.0, 1.0, 0.75]
+        )
         # Store the ImageNet statistics that the DINO models expect so that we can
         # normalize frames without relying on the engine's resize-heavy transforms.
         self._norm_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
@@ -40,10 +42,24 @@ class EmbeddingsPipeline:
         """Process a single video frame to extract embeddings."""
         orig_device = frame_data.rgb.device
         normalized = self._prepare_image_tensor(frame_data)
+        pyr_feats = self.engine.embed_frame_multiscale(normalized)
+        upfeats = self.engine.upsample_features(
+            features=pyr_feats,
+            target_size=(frame_data.rgb.shape[0], frame_data.rgb.shape[1]),
+            method="pyramid_weighted",
+        ).detach()
+        del pyr_feats
+        # Keep feature tensors on the same device as the frame so that
+        # subsequent processors (resize/crop) do not pay extra transfer costs.
+        # feats = self.engine.embed_frame(normalized)
+        
+        feats = upfeats.to(orig_device, non_blocking=True).float()
+        del upfeats
 
-        feats = self.engine.embed_frame_multiscale(normalized).detach()
-        # Keep feature tensors on the same device as the frame so that subsequent
-        # processors (resize/crop) do not pay extra transfer costs.
-        feats = feats.to(orig_device, non_blocking=True).float()
-
-        return feats, self.engine.patch_size  # (H', W', C) torch tensor, patch size
+        # self.engine.visualize_embeddings(
+        #     feats,
+        #     method="naive_rgb",
+        #     entity_path="visualizations/naive_rgb",
+        #     frame_idx=0,
+        # )
+        return feats, self.engine.patch_size  # (H', W', C) tensor, patch size

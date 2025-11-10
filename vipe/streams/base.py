@@ -220,21 +220,16 @@ class VideoFrame:
         # Distortion coefficients are usually w.r.t normalized coordinates so no need to change here.
         new_camera_type = self.camera_type
 
-        # Handle features resizing
+        # Handle features resizing - features are dense at pixel level
         new_features = None
         new_features_patch_size = self.features_patch_size
-        if self.features is not None and self.features_patch_size is not None:
-            # Calculate new feature map size based on new image size and patch size
-            new_feat_h = h1 // self.features_patch_size
-            new_feat_w = w1 // self.features_patch_size
-            new_feat_size = (new_feat_h, new_feat_w)
-            
-            # Resize features using bilinear interpolation
-            # features shape: (H/patch_size, W/patch_size, C) -> (C, H/patch_size, W/patch_size)
-            feat_for_interp = self.features.permute(2, 0, 1)[None]  # (1, C, H_feat, W_feat)
-            new_features = torch.nn.functional.interpolate(
-                feat_for_interp, new_feat_size, mode="bilinear"
-            ).squeeze(0).permute(1, 2, 0)  # Back to (H_feat_new, W_feat_new, C)
+        if self.features is not None:
+            # Features are at pixel level, same size as image
+            # features shape: (H, W, C) -> (C, H, W)
+            feat_for_interp = self.features.permute(2, 0, 1)[None]  # (1, C, H, W)
+            new_features = (
+                torch.nn.functional.interpolate(feat_for_interp, size, mode="bilinear").squeeze(0).permute(1, 2, 0)
+            )  # Back to (H_new, W_new, C)
 
         return VideoFrame(
             raw_frame_idx=self.raw_frame_idx,
@@ -280,24 +275,13 @@ class VideoFrame:
 
         new_camera_type = self.camera_type
 
-        # Handle features cropping
+        # Handle features cropping - features are dense at pixel level
         new_features = None
         new_features_patch_size = self.features_patch_size
-        if self.features is not None and self.features_patch_size is not None:
-            # Convert pixel coordinates to feature map coordinates
-            feat_top = top // self.features_patch_size
-            feat_bottom = bottom // self.features_patch_size
-            feat_left = left // self.features_patch_size
-            feat_right = right // self.features_patch_size
-            
-            # Ensure we don't go out of bounds
-            feat_h, feat_w = self.features.shape[:2]
-            feat_top = max(0, feat_top)
-            feat_left = max(0, feat_left)
-            feat_bottom = min(feat_h, feat_bottom)
-            feat_right = min(feat_w, feat_right)
-            
-            new_features = self.features[feat_top:feat_bottom, feat_left:feat_right]
+        if self.features is not None:
+            # Features are at pixel level, same size as image
+            # Simply crop using the same pixel coordinates
+            new_features = self.features[top:bottom, left:right]
 
         return VideoFrame(
             raw_frame_idx=self.raw_frame_idx,

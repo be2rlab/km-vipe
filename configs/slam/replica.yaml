@@ -49,7 +49,7 @@ keyframe_depth: dataset
 
 ba:
   dense_disp_alpha: 0.001
-  embedding_weight: 0.1
+  embedding_weight: 0.0
 
 sparse_tracks:
   name: dummy
