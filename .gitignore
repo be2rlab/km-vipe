@@ -181,4 +181,5 @@ tracker_viz/
 unidepth-torch/
 unidepth-trt/
 comparison_results
+*.png
 
