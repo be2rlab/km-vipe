@@ -11,7 +11,7 @@ class EmbeddingsPipeline:
 
     def __init__(
         self,
-        model_variant: DinoV3Variant = DinoV3Variant.VITHP,
+        model_variant: DinoV3Variant = DinoV3Variant.VITL,
         weights_dir: str | None = None,
     ) -> None:
         if weights_dir is None:
@@ -41,7 +41,7 @@ class EmbeddingsPipeline:
         orig_device = frame_data.rgb.device
         normalized = self._prepare_image_tensor(frame_data)
 
-        feats = self.engine.embed_frame_multiscale(normalized).detach()
+        feats = self.engine.embed_frame(normalized).detach()
         # Keep feature tensors on the same device as the frame so that subsequent
         # processors (resize/crop) do not pay extra transfer costs.
         feats = feats.to(orig_device, non_blocking=True).float()

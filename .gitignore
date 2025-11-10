@@ -177,3 +177,13 @@ JIAHUI.md
 weights/*
 **.txt
 tum_results
+
+
+**.txt
+**.png
+/aria_results
+**.zip
+**.npz
+**.pkl
+**.jpg
+**.csv

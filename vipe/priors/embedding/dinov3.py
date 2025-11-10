@@ -223,9 +223,10 @@ class DINOv3EmbeddingEngine:
         """Load DINOv3 model via torch.hub with optional local weights."""
         try:
             model = torch.hub.load(
-                repo_or_dir="facebookresearch/dinov3",
+                repo_or_dir="/home/user/km-vipe/dino/dinov3",
                 model=hub_id,
-                source="github",
+                source="local",
+                weights=weights_path,
             )
         except Exception as e:
             # --- OPTIMIZATION ---
@@ -233,15 +234,15 @@ class DINOv3EmbeddingEngine:
             print(f"Error loading model from GitHub ({e}). Ensure model is available.")
             raise e
 
-        if weights_path:
-            try:
-                if Path(weights_path).exists():
-                    state = torch.load(weights_path, map_location="cpu")
-                    model.load_state_dict(state, strict=False)
-                else:
-                    print(f"Weights path not found: {weights_path}. Using hub default.")
-            except Exception as e:
-                print(f"Error loading local weights: {e}. Using hub default.")
+        # if weights_path:
+        #     try:
+        #         if Path(weights_path).exists():
+        #             state = torch.load(weights_path, map_location="cpu")
+        #             model.load_state_dict(state, strict=False)
+        #         else:
+        #             print(f"Weights path not found: {weights_path}. Using hub default.")
+        #     except Exception as e:
+        #         print(f"Error loading local weights: {e}. Using hub default.")
 
         model.to(self.device)
         model.eval()

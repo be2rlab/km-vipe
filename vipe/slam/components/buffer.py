@@ -41,6 +41,7 @@ from ..interface import SLAMMap
 from ..maths import geom
 from ..maths.retractor import DenseDispRetractor, IntrinsicsRetractor, PoseRetractor, RigRotationOnlyRetractor
 from .sparse_tracks import SparseTracks
+from ..ba.kernel import AdaptiveBarronRobustKernel
 
 
 logger = logging.getLogger(__name__)
@@ -476,8 +477,8 @@ class GraphBuffer:
                 intrinsics_factor=8.0,
                 rig=None,
                 image_size=(self.height // 8, self.width // 8),
-                camera_type=self.camera_type,
-            )
+                camera_type=self.camera_type
+            ),AdaptiveBarronRobustKernel()
         )
 
         embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
