@@ -12,46 +12,79 @@ from torch import Tensor
 import matplotlib.pyplot as plt
 from guided_filter_pytorch.guided_filter import FastGuidedFilter
 import torchvision.transforms.functional as TF
+import torchvision.transforms as TVT
+import torchvision.transforms.functional as TVTF
 
 
 # --- CONFIGURATION ---
-image_path = "/home/user/km-vipe/weights/frame000000.jpg"
+image_path = "/home/user/km-vipe/weights/frame000019.jpg"
 engine_path = "/home/user/km-vipe/weights/dinov3_vitl16_backbone_dense_bf16_768.engine"
-IMG_SIZE = 768
 
+REPO_DIR = "/home/user/km-vipe/weights/dinov3"
+weights_path = "/home/user/km-vipe/weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+
+model = torch.hub.load(REPO_DIR, 'dinov3_vitl16', source='local', weights=weights_path)
+model.cuda().eval()
+
+class ResizeTransform(nn.Module):
+    """Resize image to a fixed size."""
+
+    def __init__(self, image_size: int = 768, patch_size: int = 16):
+        super().__init__()
+        self.image_size = image_size
+        self.patch_size = patch_size
+
+    def forward(self, img):
+        w, h = img.size
+        h_patches = self.image_size // self.patch_size
+        w_patches = int((w * self.image_size) / (h * self.patch_size))
+        return TVTF.resize(img, (h_patches * self.patch_size, w_patches * self.patch_size))
 
 # Preprocessing
-preprocess = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Resize((IMG_SIZE, IMG_SIZE), antialias=True),
-    transforms.Normalize(mean=(0.485, 0.456, 0.406),
-                         std=(0.229, 0.224, 0.225)),
-])
+preprocess = TVT.Compose(
+            [
+                ResizeTransform(image_size=768, patch_size=16),
+                TVT.ToTensor(),
+                TVT.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
 
 # Load image and input tensor
 image = Image.open(image_path).convert("RGB")
 img_tensor = preprocess(image).unsqueeze(0).cuda()  # [1, 3, H, W]
 print(img_tensor.shape)
+H, W = img_tensor.shape[2], img_tensor.shape[3]
 
-print("Loading TensorRT engine...")
-with open(engine_path, "rb") as f:
-    engine_bytes = f.read()
-trt_logger = trt.Logger()
-runtime = trt.Runtime(trt_logger)
-engine = runtime.deserialize_cuda_engine(engine_bytes)
-trt_model = TRTModule(
-    engine=engine,
-    input_names=["input_image"],
-    output_names=["dense_features"]
-)
-trt_model.eval()
+# print("Loading TensorRT engine...")
+# with open(engine_path, "rb") as f:
+#     engine_bytes = f.read()
+# trt_logger = trt.Logger()
+# runtime = trt.Runtime(trt_logger)
+# engine = runtime.deserialize_cuda_engine(engine_bytes)
+# trt_model = TRTModule(
+#     engine=engine,
+#     input_names=["input_image"],
+#     output_names=["dense_features"]
+# )
+# trt_model.eval()
 
-with torch.no_grad():
-    trt_feats = trt_model(img_tensor).float()
+# with torch.no_grad():
+#     trt_feats = trt_model(img_tensor).float()
 
-print(trt_feats.shape)
-trt_feats = trt_feats.squeeze(0).permute(1, 2, 0).contiguous()
-print(trt_feats.shape) # [D, Hp, Wp] # [1024, 48, 48]
+# print(trt_feats.shape)
+# trt_feats = trt_feats.squeeze(0).permute(1, 2, 0).contiguous()
+# print(trt_feats.shape) # [D, Hp, Wp] # [1024, 48, 48]
+
+amp_dtype = torch.bfloat16
+with torch.inference_mode(), torch.amp.autocast(device_type="cuda", dtype=amp_dtype):
+    x = img_tensor
+    target_layer = (24 + -1) % 24
+
+    feats_list = model.get_intermediate_layers(x, n=[target_layer], reshape=True, norm=True)
+    feats = feats_list[0][0]  # [D, h, w]
+    feats = feats.permute(1, 2, 0).contiguous() 
+
+print(feats.shape)
 
 def visualize_embeddings_plt(
     features: Tensor,
@@ -128,9 +161,9 @@ def visualize_embeddings_plt(
     
     return None
 
-visualize_embeddings_plt(trt_feats, method="naive_rgb", save_path = "/home/user/km-vipe/featmap.png")
+visualize_embeddings_plt(feats, method="naive_rgb", save_path = "/home/user/km-vipe/featmap.png")
 
-batched_feats = trt_feats.permute(2, 0, 1).unsqueeze(0).contiguous()
+batched_feats = feats.permute(2, 0, 1).unsqueeze(0).contiguous()
 print(f"batched_feats: {batched_feats.shape}")
 
 img_tensor_b = img_tensor  # [1,3,768,768]
@@ -172,16 +205,15 @@ img_tensor_b = img_tensor  # [1,3,768,768]
 
 print(f"img_tensor_b: {img_tensor_b.shape}")
 hr_gray = TF.rgb_to_grayscale(img_tensor_b)  # [1,1,768,768]
-lr_gray = F.interpolate(hr_gray, size=(224, 224), mode='bicubic', align_corners=False)
+lr_gray = F.interpolate(hr_gray, size=(H//4, W//4), mode='bilinear', align_corners=False)
 print(f"lr_gray: {lr_gray.shape}")
 
-gf = FastGuidedFilter(r=4, eps=1e-3)
+gf = FastGuidedFilter(r=2, eps=1e-2)
 refined_channels = []
 for i in range(batched_feats.shape[1]):
     feat_channel = batched_feats[:, i:i+1, :, :]  # [1, 1, 48, 48]
     
-    upsampled = F.interpolate(feat_channel, size=(224, 224), 
-                             mode='nearest')
+    upsampled = F.interpolate(feat_channel, size=(H//4, W//4), mode='bilinear', align_corners=False)
 
     filtered = gf(lr_gray, upsampled, hr_gray)
     refined_channels.append(filtered)
@@ -191,7 +223,7 @@ print(refined.shape)  # [1,1024,768,768]
 
 visualize_embeddings_plt(refined.squeeze(0).permute(1, 2, 0), method="naive_rgb", save_path = "/home/user/km-vipe/featmap_up.png")
 
-refined_down = F.interpolate(refined, size=(48, 48), mode='bilinear')
+refined_down = F.interpolate(refined, size=(H//16, W//16), mode='bilinear')
 
 # Compute cosine similarity per spatial location
 cos_sim = F.cosine_similarity(
@@ -235,8 +267,8 @@ def pca_visualization(feats_48, feats_768):
     pca = PCA(n_components=3)
     pca.fit(f1)
     
-    rgb1 = pca.transform(f1).reshape(48, 48, 3)
-    rgb2 = pca.transform(f2).reshape(768, 768, 3)
+    rgb1 = pca.transform(f1).reshape(H//16, W//16, 3)
+    rgb2 = pca.transform(f2).reshape(H, W, 3)
     
     # Normalize to [0, 1]
     rgb1 = (rgb1 - rgb1.min()) / (rgb1.max() - rgb1.min())
@@ -280,11 +312,6 @@ def comprehensive_check(feats_orig, feats_refined):
     print(f"Spatial Correlation (refined): {refined_corr.item():.4f}")
     print(f"Spatial Correlation Loss: {abs(orig_corr - refined_corr).item():.4f}")
     
-    from pytorch_msssim import ssim  # pip install pytorch-msssim
-    # Compare first few channels as proxy
-    ssim_val = ssim(feats_orig[:, :3], feats_down[:, :3], 
-                    data_range=feats_orig.max()-feats_orig.min())
-    print(f"SSIM (structure): {ssim_val.item():.4f}")
     print("="*50)
 
 comprehensive_check(batched_feats, refined)

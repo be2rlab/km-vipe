@@ -24,7 +24,7 @@ init:
 slam:
   keyframe_depth: unidepth-l
   optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
-  visualize: true
+  visualize: false
 
 # Post-processing configs
 post:

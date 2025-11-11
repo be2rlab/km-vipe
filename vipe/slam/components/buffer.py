@@ -480,29 +480,30 @@ class GraphBuffer:
             )
         )
 
-        embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
-        if self.embeddings is not None and embedding_weight > 0.0:
-            embedding_valid = (
-                self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
-            )
-            solver.add_term(
-                EmbeddingSimilarityTerm(
-                    pose_i_inds=pi,
-                    pose_j_inds=pj,
-                    rig_i_inds=qi,
-                    rig_j_inds=qj,
-                    dense_disp_i_inds=di,
-                    dense_disp_j_inds=dj,
-                    embeddings=self.flattened_embeddings,
-                    embedding_valid_mask=embedding_valid,
-                    weight=embedding_weight,
-                    intrinsics=None,
-                    intrinsics_factor=8.0,
-                    rig=None,
-                    image_size=(self.height // 8, self.width // 8),
-                    camera_type=self.camera_type,
-                )
-            )
+        # embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
+        # if self.embeddings is not None and embedding_weight > 0.0:
+            # print(self.embeddings.shape)
+            # embedding_valid = (
+            #     self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
+            # )
+            # solver.add_term(
+            #     EmbeddingSimilarityTerm(
+            #         pose_i_inds=pi,
+            #         pose_j_inds=pj,
+            #         rig_i_inds=qi,
+            #         rig_j_inds=qj,
+            #         dense_disp_i_inds=di,
+            #         dense_disp_j_inds=dj,
+            #         embeddings=self.flattened_embeddings,
+            #         embedding_valid_mask=embedding_valid,
+            #         weight=embedding_weight,
+            #         intrinsics=None,
+            #         intrinsics_factor=8.0,
+            #         rig=None,
+            #         image_size=(self.height // 8, self.width // 8),
+            #         camera_type=self.camera_type,
+            #     )
+            # )
 
         if self.sparse_tracks.enabled:
             # This does not support cross-view tracking yet.

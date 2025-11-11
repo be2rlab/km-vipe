@@ -41,9 +41,6 @@ class EmbeddingsPipeline:
         orig_device = frame_data.rgb.device
         normalized = self._prepare_image_tensor(frame_data)
 
-        feats = self.engine.embed_frame_multiscale(normalized).detach()
-        # Keep feature tensors on the same device as the frame so that subsequent
-        # processors (resize/crop) do not pay extra transfer costs.
-        feats = feats.to(orig_device, non_blocking=True).float()
+        feats = self.engine.embed_frame(normalized).detach()
 
         return feats, self.engine.patch_size  # (H', W', C) torch tensor, patch size

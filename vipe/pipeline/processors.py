@@ -310,8 +310,8 @@ class EmbeddingsProcessor(StreamProcessor):
 
     def __init__(
         self,
-        model_variant: DinoV3Variant = DinoV3Variant.VITS,
-        weights_dir: str = "/home/user/km-vipe/weights/dinov3",
+        model_variant: DinoV3Variant = DinoV3Variant.VITL,
+        weights_dir: str = "/home/user/km-vipe/weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
     ) -> None:
         self.embedder = EmbeddingsPipeline(model_variant=model_variant, weights_dir=weights_dir)
 
