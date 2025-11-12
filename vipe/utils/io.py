@@ -99,6 +99,10 @@ class ArtifactPath:
         return self.base_path / "vipe" / f"{self.artifact_name}_slam_map.pt"
 
     @property
+    def pca_state_path(self) -> Path:
+        return self.base_path / "vipe" / f"{self.artifact_name}_pca_state.pt"
+
+    @property
     def essential_paths(self) -> list[Path]:
         return [
             self.rgb_path,
