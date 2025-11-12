@@ -56,7 +56,7 @@ class DefaultAnnotationPipeline(Pipeline):
         self.camera_type = CameraType(self.init_cfg.camera_type)
 
     @profile_function()
-    def _add_init_processors(self, video_stream: VideoStream) -> ProcessedVideoStream:
+    def _add_init_processors(self, video_stream: VideoStream, artifact_path: io.ArtifactPath) -> ProcessedVideoStream:
         init_processors: list[StreamProcessor] = []
 
         # The assertions make sure that the attributes are not estimated previously.
@@ -114,7 +114,8 @@ class DefaultAnnotationPipeline(Pipeline):
             return annotate_output
 
         slam_streams: list[VideoStream] = [
-            self._add_init_processors(video_stream).cache("process", online=True) for video_stream in video_streams
+            self._add_init_processors(video_stream, artifact_path).cache("process", online=True)
+            for video_stream, artifact_path in zip(video_streams, artifact_paths)
         ]
 
         with profiler_section("pipeline.slam"):

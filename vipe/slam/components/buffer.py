@@ -716,6 +716,11 @@ class GraphBuffer:
         n_frames, n_views, ht, wd, _ = images.shape
 
         pts_list, mask_list = [], []
+        embedding_list: list[torch.Tensor] = []
+        embedding_mask_list: list[torch.Tensor] = []
+        has_embeddings = self.embeddings is not None
+        has_embedding_mask = self.embedding_valid_mask is not None
+
         for v in range(self.n_views):
             c2w_view: SE3 = c2w_se3 * SE3(self.rig[v])[None]  # type: ignore
             disps_v = self.disps[t_range, v].contiguous()  # (n_frames, ht, wd)
@@ -747,11 +752,22 @@ class GraphBuffer:
             pts_list.append(pts)
             mask_list.append(masks)
 
+            if has_embeddings:
+                view_embeddings = self.embeddings[t_range, v]  # (n_frames, C, ht, wd)
+                view_embeddings = view_embeddings.permute(0, 2, 3, 1).contiguous()  # (n_frames, ht, wd, C)
+                embedding_list.append(view_embeddings)
+                if has_embedding_mask:
+                    embedding_mask_list.append(self.embedding_valid_mask[t_range, v])
+                else:
+                    embedding_mask_list.append(torch.ones_like(masks))
+
         return SLAMMap.from_masked_dense_disp(
             torch.stack(pts_list, dim=1),
             images,
             torch.stack(mask_list, dim=1),
             self.tstamp[t_range],
+            embeddings=torch.stack(embedding_list, dim=1) if has_embeddings else None,
+            embedding_mask=torch.stack(embedding_mask_list, dim=1) if has_embeddings else None,
         )
 
     def log_tracks(self):
