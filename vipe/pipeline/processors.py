@@ -15,9 +15,9 @@
 
 
 import logging
-from pathlib import Path
 
-from typing import Iterator
+from pathlib import Path
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -26,7 +26,8 @@ from vipe.priors.depth import DepthEstimationInput, make_depth_model
 from vipe.priors.depth.alignment import align_inv_depth_to_depth
 from vipe.priors.depth.priorda import PriorDAModel
 from vipe.priors.depth.videodepthanything import VideoDepthAnythingDepthModel
-from vipe.priors.embedding import EmbeddingsPipeline
+from vipe.priors.embedding import DinoBackboneFamily, EmbeddingsPipeline
+from vipe.priors.embedding.dinov2 import DinoV2Variant
 from vipe.priors.embedding.dinov3 import DinoV3Variant
 from vipe.priors.geocalib import GeoCalib
 from vipe.priors.track_anything import TrackAnythingPipeline
@@ -305,19 +306,26 @@ class AdaptiveDepthProcessor(StreamProcessor):
 
 
 class EmbeddingsProcessor(StreamProcessor):
-    """
-    A processor that tracks a mask caption in the video.
-    """
+    """Compute dense embeddings (optionally pooled by YOLOE instances)."""
 
     def __init__(
         self,
-        model_variant: DinoV3Variant = DinoV3Variant.VITSP,
-        weights_dir: str = "/home/user/km-vipe/weights/dinov3",
+        model_family: DinoBackboneFamily | str = DinoBackboneFamily.DINOV2,
+        model_variant: str | DinoV3Variant | DinoV2Variant | None = DinoV2Variant.VITS,
+        weights_dir: str | None = "/home/user/km-vipe/weights/dinov2",
         pca_state_path: Path | None = None,
+        **pipeline_kwargs: Any,
     ) -> None:
-        self.embedder = EmbeddingsPipeline(model_variant=model_variant, weights_dir=weights_dir)
+        default_kwargs = {"segment_with_yoloe": False}
+        default_kwargs.update(pipeline_kwargs)
         self.pca_state_path = pca_state_path
         self._pca_state_saved = False
+        self.embedder = EmbeddingsPipeline(
+            model_family=model_family,
+            model_variant=model_variant,
+            weights_dir=weights_dir,
+            **default_kwargs,
+        )
 
     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
         return previous_attributes | {FrameAttribute.FEATURES, FrameAttribute.FEATURES_PATCH_SIZE}

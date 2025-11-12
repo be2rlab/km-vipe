@@ -293,6 +293,28 @@ class DINOv2EmbeddingEngine:
             ]
         )
 
+    def _patch_aligned_size(self, height: int, width: int, scale: float = 1.0) -> Tuple[int, int]:
+        """Return (H, W) scaled and rounded up to the nearest patch multiple."""
+        scaled_h = max(self.patch_size, int(round(height * scale)))
+        scaled_w = max(self.patch_size, int(round(width * scale)))
+        aligned_h = ((scaled_h + self.patch_size - 1) // self.patch_size) * self.patch_size
+        aligned_w = ((scaled_w + self.patch_size - 1) // self.patch_size) * self.patch_size
+        return aligned_h, aligned_w
+
+    def _resize_tensor(self, tensor: Tensor, size: Tuple[int, int]) -> Tensor:
+        """Resize CHW or BCHW tensor if it does not already match `size`."""
+        if tensor.shape[-2:] == size:
+            return tensor
+        needs_batch_dim = tensor.dim() == 3
+        data = tensor.unsqueeze(0) if needs_batch_dim else tensor
+        resized = F.interpolate(data, size=size, mode="bicubic", align_corners=False)
+        return resized.squeeze(0) if needs_batch_dim else resized
+
+    def _ensure_patch_multiple(self, tensor: Tensor) -> Tensor:
+        """Ensure tensor spatial dims are divisible by the patch size."""
+        target_size = self._patch_aligned_size(tensor.shape[-2], tensor.shape[-1], scale=1.0)
+        return self._resize_tensor(tensor, target_size)
+
     def reset_state(self):
         self.num_masks: int = 0
         self.frame_height: int = 0
@@ -314,6 +336,8 @@ class DINOv2EmbeddingEngine:
             img_tensor = image.to(self.device, non_blocking=True)
         else:
             raise ValueError("Input image must be a PIL Image or a Tensor")
+
+        img_tensor = self._ensure_patch_multiple(img_tensor)
 
         # Log original image to Rerun
         if self.enable_rerun and frame_idx is not None:
@@ -343,6 +367,7 @@ class DINOv2EmbeddingEngine:
         if batch_chw.dim() != 4:
             raise ValueError("Expected batch tensor of shape [B,C,H,W]")
         batch_chw = batch_chw.to(self.device, non_blocking=True)
+        batch_chw = self._ensure_patch_multiple(batch_chw)
         with torch.inference_mode(), self._amp_context():
             feats_list = self.model.get_intermediate_layers(batch_chw, n=1, reshape=True, norm=True)
             feats = feats_list[0]  # [B, D, h, w]
@@ -358,21 +383,13 @@ class DINOv2EmbeddingEngine:
             base = self.transform(image).to(self.device)
         else:
             base = image.to(self.device)
+        base = self._ensure_patch_multiple(base)
         _, H, W = base.shape
         feats_pyr: List[Tensor] = []
         with torch.inference_mode(), self._amp_context():
             for s in scales:
-                if s == 1.0:
-                    scaled = base
-                else:
-                    Nh = max(self.patch_size, int(round(H * s)))
-                    Nw = max(self.patch_size, int(round(W * s)))
-                    # keep patch alignment
-                    Nh = ((Nh + self.patch_size - 1) // self.patch_size) * self.patch_size
-                    Nw = ((Nw + self.patch_size - 1) // self.patch_size) * self.patch_size
-                    scaled = F.interpolate(
-                        base.unsqueeze(0), size=(Nh, Nw), mode="bicubic", align_corners=False
-                    ).squeeze(0)
+                target_hw = self._patch_aligned_size(H, W, scale=s)
+                scaled = base if target_hw == (H, W) else self._resize_tensor(base, target_hw)
                 flist = self.model.get_intermediate_layers(scaled.unsqueeze(0), n=1, reshape=True, norm=True)
                 f = flist[0][0].permute(1, 2, 0).contiguous()  # [h,w,D]
                 feats_pyr.append(f)
@@ -389,17 +406,13 @@ class DINOv2EmbeddingEngine:
         scales = scales or self.pyramid_scales
         B, C, H, W = batch_chw.shape
         batch_chw = batch_chw.to(self.device)
+        batch_chw = self._ensure_patch_multiple(batch_chw)
+        _, _, H, W = batch_chw.shape
         outputs: List[Tensor] = []
         with torch.inference_mode(), self._amp_context():
             for s in scales:
-                if s == 1.0:
-                    scaled = batch_chw
-                else:
-                    Nh = max(self.patch_size, int(round(H * s)))
-                    Nw = max(self.patch_size, int(round(W * s)))
-                    Nh = ((Nh + self.patch_size - 1) // self.patch_size) * self.patch_size
-                    Nw = ((Nw + self.patch_size - 1) // self.patch_size) * self.patch_size
-                    scaled = F.interpolate(batch_chw, size=(Nh, Nw), mode="bicubic", align_corners=False)
+                target_hw = self._patch_aligned_size(H, W, scale=s)
+                scaled = batch_chw if target_hw == (H, W) else self._resize_tensor(batch_chw, target_hw)
                 flist = self.model.get_intermediate_layers(scaled, n=1, reshape=True, norm=True)
                 f = flist[0].permute(0, 2, 3, 1).contiguous()  # [B,h,w,D]
                 outputs.append(f)
