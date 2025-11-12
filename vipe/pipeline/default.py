@@ -75,7 +75,7 @@ class DefaultAnnotationPipeline(Pipeline):
                     sam_run_gap=int(video_stream.fps() * self.init_cfg.instance.kf_gap_sec),
                 )
             )
-        init_processors.append(EmbeddingsProcessor(pca_state_path=artifact_path.pca_state_path))
+        # init_processors.append(EmbeddingsProcessor(pca_state_path=artifact_path.pca_state_path))
         return ProcessedVideoStream(video_stream, init_processors)
 
     @profile_function()

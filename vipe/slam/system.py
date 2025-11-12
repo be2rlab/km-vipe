@@ -15,6 +15,8 @@
 
 import uuid
 
+from pathlib import Path
+
 import numpy as np
 import rerun as rr
 import torch
@@ -26,6 +28,9 @@ from omegaconf import DictConfig, OmegaConf
 from vipe.ext.lietorch import SE3
 from vipe.priors.depth import make_depth_model
 from vipe.priors.depth.base import DepthType
+from vipe.priors.embedding import DinoBackboneFamily, EmbeddingsPipeline
+from vipe.priors.embedding.dinov2 import DinoV2Variant
+from vipe.priors.embedding.dinov3 import DinoV3Variant
 from vipe.streams.base import FrameAttribute, ProcessedVideoStream, StreamProcessor, VideoFrame, VideoStream
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
@@ -130,9 +135,7 @@ class SLAMSystem:
             dataset_path = self.get_config_value(dataset_cfg, "dataset_path")
             sequence_name = self.get_config_value(dataset_cfg, "sequence_name")
             # self.metric_depth = make_depth_model(self.config.keyframe_depth,self.config.dataset.dataset_name,self.config.dataset.dataset_path,self.config.dataset.sequence_name)
-            self.metric_depth = make_depth_model(self.config.keyframe_depth,
-                                                 dataset_name, dataset_path,
-                                                 sequence_name)
+            self.metric_depth = make_depth_model(self.config.keyframe_depth, dataset_name, dataset_path, sequence_name)
             assert self.metric_depth.depth_type in [
                 DepthType.METRIC_DEPTH,
                 DepthType.MODEL_METRIC_DEPTH,
@@ -145,6 +148,48 @@ class SLAMSystem:
             print(f"Using depth model: {self.metric_depth.depth_type}")
         else:
             print("No depth model used!!!!")
+        model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
+        model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITS
+        weights_dir = None
+        if model_variant == DinoV3Variant:
+            weights_dir = "/home/user/km-vipe/weights/dinov3"
+        elif model_variant == DinoV2Variant:
+            weights_dir = "/home/user/km-vipe/weights/dinov2"
+        else:
+            print("Not clear model Variant!!!")
+        self.pca_state_path = Path("/home/user/km-vipe/vipe_results/vipe/pca_basis.pt")
+        self._pca_state_saved = False
+        self.embedder = EmbeddingsPipeline(
+            model_family=model_family,
+            model_variant=model_variant,
+            weights_dir=weights_dir,
+        )
+        self.embedded_keyframes = set()
+
+    def _maybe_save_pca_state(self) -> None:
+        if self._pca_state_saved or self.pca_state_path is None:
+            return
+
+        projector = self.embedder.projector
+        if projector is None or not projector.is_fit():
+            return
+
+        state = projector.state_dict()
+        state_cpu = {k: v.detach().cpu() for k, v in state.items()}
+        payload = {
+            "mean": state_cpu["mean"],
+            "components": state_cpu["components"],
+            "metadata": {
+                "target_dim": projector.target_dim,
+                "max_samples": projector.max_samples,
+                "seed": projector.seed,
+            },
+        }
+
+        self.pca_state_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, self.pca_state_path)
+        print(f"Saved PCA state to {self.pca_state_path}")
+        self._pca_state_saved = True
 
     @profile_function()
     def _add_keyframe(
@@ -176,6 +221,12 @@ class SLAMSystem:
 
             if frame_data.pose is not None and phase == 1:
                 self.buffer.poses[kf_idx] = (SE3(self.buffer.rig[view_idx]) * frame_data.pose.inv()).data
+
+            if self.embedder is not None and kf_idx not in self.embedded_keyframes:
+                # print(f"[EMBEDDER] Running on keyframe_idx={kf_idx}, frame_idx={frame_idx}")
+                frame_data.features, frame_data.features_patch_size = self.embedder.process_frame(frame_data)
+                self._maybe_save_pca_state()
+                self.embedded_keyframes.add(kf_idx)
 
             if frame_data.features is not None:
                 features = frame_data.features.permute(2, 0, 1).to(self.device, dtype=torch.float32)
