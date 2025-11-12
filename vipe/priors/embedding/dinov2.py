@@ -25,6 +25,10 @@ class DinoV2Variant(str, Enum):
     VITB = "vitb14"
     VITL = "vitl14"
     VITG = "vitg14"
+    VITS_REG = "vits14_reg"
+    VITB_REG = "vitb14_reg"
+    VITL_REG = "vitl14_reg"
+    VITG_REG = "vitg14_reg"
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,10 @@ REGISTRY: Dict[DinoV2Variant, DinoV2Config] = {
     DinoV2Variant.VITB: DinoV2Config("dinov2_vitb14", "dinov2_vitb14_pretrain.pth"),
     DinoV2Variant.VITL: DinoV2Config("dinov2_vitl14", "dinov2_vitl14_pretrain.pth"),
     DinoV2Variant.VITG: DinoV2Config("dinov2_vitg14", "dinov2_vitg14_pretrain.pth"),
+    DinoV2Variant.VITS_REG: DinoV2Config("dinov2_vits14_reg", "dinov2_vits14_reg4_pretrain.pth"),
+    DinoV2Variant.VITB_REG: DinoV2Config("dinov2_vitb14_reg", "dinov2_vitb14_reg4_pretrain.pth"),
+    DinoV2Variant.VITL_REG: DinoV2Config("dinov2_vitl14_reg", "dinov2_vitl14_reg4_pretrain.pth"),
+    DinoV2Variant.VITG_REG: DinoV2Config("dinov2_vitg14_reg", "dinov2_vitg14_reg4_pretrain.pth"),
 }
 
 Alias = Union[DinoV2Variant, str]
@@ -50,6 +58,14 @@ _ALIAS_NORMALIZATION = {
     "vitl14": "vitl14",
     "vitg": "vitg14",
     "vitg14": "vitg14",
+    "vits_reg": "vits14_reg",
+    "vits14_reg": "vits14_reg",
+    "vitb_reg": "vitb14_reg",
+    "vitb14_reg": "vitb14_reg",
+    "vitl_reg": "vitl14_reg",
+    "vitl14_reg": "vitl14_reg",
+    "vitg_reg": "vitg14_reg",
+    "vitg14_reg": "vitg14_reg",
 }
 
 
