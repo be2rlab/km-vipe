@@ -38,7 +38,7 @@ from vipe.utils.profiler import profile_function, profiler_section
 from vipe.utils.visualization import save_projection_video
 
 from . import AnnotationPipelineOutput, Pipeline
-from .processors import AdaptiveDepthProcessor, EmbeddingsProcessor, GeoCalibIntrinsicsProcessor, TrackAnythingProcessor
+from .processors import AdaptiveDepthProcessor, GeoCalibIntrinsicsProcessor, TrackAnythingProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class DefaultAnnotationPipeline(Pipeline):
                     sam_run_gap=int(video_stream.fps() * self.init_cfg.instance.kf_gap_sec),
                 )
             )
-        init_processors.append(EmbeddingsProcessor())
+        # init_processors.append(EmbeddingsProcessor())
         return ProcessedVideoStream(video_stream, init_processors)
 
     @profile_function()

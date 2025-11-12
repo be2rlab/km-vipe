@@ -35,6 +35,7 @@ from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
 from vipe.utils.misc import unpack_optional
 from vipe.utils.morph import erode
+from vipe.utils.profiler import profiler_section
 
 
 logger = logging.getLogger(__name__)
@@ -303,21 +304,28 @@ class AdaptiveDepthProcessor(StreamProcessor):
             yield frame
 
 
-class EmbeddingsProcessor(StreamProcessor):
-    """
-    A processor that tracks a mask caption in the video.
-    """
+# class EmbeddingsProcessor(StreamProcessor):
+#     """
+#     A processor that tracks a mask caption in the video.
+#     """
 
-    def __init__(
-        self,
-        model_variant: DinoV3Variant = DinoV3Variant.VITSP,
-        weights_dir: str = "/home/user/km-vipe/weights/dinov3",
-    ) -> None:
-        self.embedder = EmbeddingsPipeline(model_variant=model_variant, weights_dir=weights_dir)
+#     def __init__(
+#         self,
+#         model_variant: DinoV3Variant = DinoV3Variant.VITB,
+#         weights_dir: str = "/home/user/km-vipe/weights/",
+#     ) -> None:
+#         self.embedder = EmbeddingsPipeline(model_variant=model_variant, weights_dir=weights_dir)
 
-    def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
-        return previous_attributes | {FrameAttribute.FEATURES, FrameAttribute.FEATURES_PATCH_SIZE}
+#     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
+#         return previous_attributes | {FrameAttribute.FEATURES, FrameAttribute.FEATURES_PATCH_SIZE}
 
-    def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
-        frame.features, frame.features_patch_size = self.embedder.process_frame(frame)
-        return frame
+#     def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+#         with profiler_section(f"Embedder.process_frame"):
+#             frame.features, frame.features_patch_size = self.embedder.process_frame(frame)
+#         return frame
+    
+#     def embed_Keyframe(self, frame_idx: int, frame: VideoFrame) -> tuple[torch.Tensor, int]:
+#         with profiler_section(f"Embedder.embed_keyframe"):
+#             features, features_patch_size = self.embedder.process_frame(frame)
+#         return features, features_patch_size
+        

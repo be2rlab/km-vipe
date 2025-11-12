@@ -152,6 +152,7 @@ class GraphBuffer:
         self.embedding_valid_mask: torch.Tensor | None = None
         self.embedding_dim: int | None = None
         self.embedding_resolution: tuple[int, int] | None = None
+        self.embedding_storage = {}
 
         # Droid attributes
         # The updated operator will take the correlation volume of fmaps, the nets, and the inps,

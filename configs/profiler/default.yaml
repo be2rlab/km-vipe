@@ -1,4 +1,4 @@
 enabled: true
-output: null
+output: profiling/
 min_percentage: 0.0
 max_depth: null
