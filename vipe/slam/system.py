@@ -26,6 +26,7 @@ from omegaconf import DictConfig, OmegaConf
 from vipe.ext.lietorch import SE3
 from vipe.priors.depth import make_depth_model
 from vipe.priors.depth.base import DepthType
+from vipe.priors.embedding import EmbeddingsPipeline, DinoV3Variant
 from vipe.streams.base import FrameAttribute, ProcessedVideoStream, StreamProcessor, VideoFrame, VideoStream
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
@@ -146,6 +147,9 @@ class SLAMSystem:
         else:
             print("No depth model used!!!!")
 
+        self.embedder = EmbeddingsPipeline(model_variant = DinoV3Variant.VITB)
+        self.embedded_keyframes = set()
+
     @profile_function()
     def _add_keyframe(
         self,
@@ -176,6 +180,11 @@ class SLAMSystem:
 
             if frame_data.pose is not None and phase == 1:
                 self.buffer.poses[kf_idx] = (SE3(self.buffer.rig[view_idx]) * frame_data.pose.inv()).data
+
+            if self.embedder is not None and kf_idx not in self.embedded_keyframes:
+                print(f"[EMBEDDER] Running on keyframe_idx={kf_idx}, frame_idx={frame_idx}")
+                frame_data.features, frame_data.features_patch_size = self.embedder.process_frame(frame_data)
+                self.embedded_keyframes.add(kf_idx)
 
             if frame_data.features is not None:
                 features = frame_data.features.permute(2, 0, 1).to(self.device, dtype=torch.float32)
