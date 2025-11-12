@@ -34,6 +34,6 @@ output:
   save_slam_map: true
 
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
-  save_viz: true
+  save_viz: false
   viz_downsample: 2
   viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]

@@ -151,12 +151,13 @@ class SLAMSystem:
         model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
         model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
         weights_dir = None
-        if model_variant == DinoV3Variant:
-            weights_dir = "/home/user/km-vipe/weights/dinov3"
-        elif model_variant == DinoV2Variant:
-            weights_dir = "/home/user/km-vipe/weights/dinov2"
-        else:
-            print("Not clear model Variant!!!")
+        # if model_variant == DinoV3Variant:
+        #     weights_dir = "/home/user/km-vipe/weights/dinov3"
+        # elif model_variant == DinoV2Variant:
+        #     weights_dir = "/home/user/km-vipe/weights/dinov2"
+        # else:
+        #     print("Not clear model Variant!!!")
+        weights_dir = "/home/user/km-vipe/weights/dinov3"
         self.pca_state_path = Path("/home/user/km-vipe/vipe_results/vipe/pca_basis.pt")
         self._pca_state_saved = False
         self.embedder = EmbeddingsPipeline(
