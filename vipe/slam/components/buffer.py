@@ -473,28 +473,12 @@ class GraphBuffer:
         pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
 
         solver = Solver(compute_energy=verbose)
-        solver.add_term(
-            DenseDepthFlowTerm(
-                pose_i_inds=pi,
-                pose_j_inds=pj,
-                rig_i_inds=qi,
-                rig_j_inds=qj,
-                dense_disp_i_inds=di,
-                target=target,
-                weight=weight_dense_disp * weight,
-                intrinsics=None,
-                intrinsics_factor=8.0,
-                rig=None,
-                image_size=(self.height // 8, self.width // 8),
-                camera_type=self.camera_type
-            ),AdaptiveBarronRobustKernel()
-        )
 
         embedding_term_activation_iter = n_iters
         embedding_term = None
         embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
         embedding_weight_map: torch.Tensor | None = None
-        if self.embeddings is not None and embedding_weight > 0.0:
+        if self.embeddings is not None:
             embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
             dense_h, dense_w = self.height // 8, self.width // 8
             per_pixel_weight = rearrange(
@@ -505,6 +489,31 @@ class GraphBuffer:
                 c=2,
             ).mean(dim=-1)
             embedding_weight_map = embedding_weight * per_pixel_weight
+
+        solver.add_term(
+            DenseDepthFlowTerm(
+                pose_i_inds=pi,
+                pose_j_inds=pj,
+                rig_i_inds=qi,
+                rig_j_inds=qj,
+                dense_disp_i_inds=di,
+                dense_disp_j_inds=dj,
+                embeddings=self.flattened_embeddings if self.embeddings is not None else None,
+                embedding_valid_mask=embedding_valid if self.embeddings is not None else None,
+                embedding_weight=embedding_weight_map if self.embeddings is not None else None,
+                target=target,
+                weight=weight_dense_disp * weight,
+                debug_options=self.embedding_debug_options if self.embeddings is not None else None,
+                intrinsics=None,
+                intrinsics_factor=8.0,
+                rig=None,
+                image_size=(self.height // 8, self.width // 8),
+                camera_type=self.camera_type
+            ),AdaptiveBarronRobustKernel()
+        )
+
+        if self.embeddings is not None and embedding_weight > 0.0:
+            print("Yes we are adding the embedding term!")
             embedding_term = EmbeddingSimilarityTerm(
                 pose_i_inds=pi,
                 pose_j_inds=pj,

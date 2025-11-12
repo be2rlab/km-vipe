@@ -19,7 +19,7 @@ init:
       - pet
       - car
       - bus
-    add_sky: true
+    add_sky: false
 
 slam:
   keyframe_depth: unidepth-l
