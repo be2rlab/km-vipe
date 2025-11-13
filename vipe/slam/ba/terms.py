@@ -385,9 +385,25 @@ class DenseDepthFlowTerm(SolverTerm):
             residual[cs] = residual_chunk.view(-1, pixel_count)
         return residual, weight
 
+    # def calculate_alpha(self, embedding_residual, embedding_residual_weights, alpha_min=-10, alpha_max=2):
+    #     x = embedding_residual
+        
+    #     # Create a mask for values below 0.6
+    #     mask_below_threshold = x < 0.4
+        
+    #     # Normalize x from [0.6, 1] to [0, 1] for values >= 0.6
+    #     x_normalized = (x - 0.4) / (1 - 0.4)  # This gives range [0, 1] for x in [0.6, 1]
+    #     x_normalized = torch.clamp(x_normalized, 0, 1)  # Ensure values are within [0, 1]
+        
+    #     # Apply sigmoid transformation only to values >= 0.6
+    #     sigmoid_output = (alpha_max - alpha_min) / (1 + torch.exp(-(x_normalized - 0.5) / 0.1)) + alpha_min
+        
+    #     # Set alpha to -20 for values below 0.6, otherwise use sigmoid output
+    #     self.alpha = torch.where(mask_below_threshold, torch.tensor(alpha_min, dtype=x.dtype, device=x.device), sigmoid_output)
+
     def calculate_alpha(self, embedding_residual,embedding_residual_weights,alpha_min = -20, alpha_max = 2):
-        x = embedding_residual
-        self.alpha = (alpha_max - alpha_min) / (1 + torch.exp(-(x - 0.5) / 0.1)) + alpha_min
+            x = embedding_residual
+            self.alpha = (alpha_max - alpha_min) / (1 + torch.exp(-(x - 0.5) / 0.1)) + alpha_min
 
 
     def _prepare_embedding_weight(self, weight: torch.Tensor | float) -> tuple[torch.Tensor, bool]:
