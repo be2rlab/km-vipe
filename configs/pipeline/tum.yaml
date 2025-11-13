@@ -10,19 +10,11 @@ init:
   instance:
     kf_gap_sec: 2.0
     phrases: 
-      - person
-      - animal
-      - vehicle
-      - ball
-      - balloon
       - gun
-      - pet
-      - car
-      - bus
-    add_sky: true
+    add_sky: false
 
 slam:
-  keyframe_depth: dataset
+  keyframe_depth: unidepth-l
   optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
   visualize: true
 
@@ -38,8 +30,9 @@ output:
 
   # Save artifacts and a info file
   save_artifacts: false
+  save_slam_map: true
 
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
-  save_viz: true
+  save_viz: false
   viz_downsample: 2
   viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
