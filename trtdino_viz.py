@@ -18,7 +18,7 @@ import torchvision.transforms.functional as TVTF
 
 # --- CONFIGURATION ---
 image_path = "/home/user/km-vipe/weights/frame000019.jpg"
-engine_path = "/home/user/km-vipe/weights/dinov3_vitl16_backbone_dense_bf16_768.engine"
+engine_path = "/home/user/km-vipe/weights/dinov3_vitl16_bf16_768.engine"
 
 REPO_DIR = "/home/user/km-vipe/weights/dinov3"
 weights_path = "/home/user/km-vipe/weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
@@ -205,17 +205,15 @@ img_tensor_b = img_tensor  # [1,3,768,768]
 
 print(f"img_tensor_b: {img_tensor_b.shape}")
 hr_gray = TF.rgb_to_grayscale(img_tensor_b)  # [1,1,768,768]
-lr_gray = F.interpolate(hr_gray, size=(H//4, W//4), mode='bilinear', align_corners=False)
+lr_gray = F.interpolate(hr_gray, size=(H//16, W//16), mode='bilinear', align_corners=False)
 print(f"lr_gray: {lr_gray.shape}")
 
-gf = FastGuidedFilter(r=2, eps=1e-2)
+gf = FastGuidedFilter(r=2, eps=1e-4)
 refined_channels = []
 for i in range(batched_feats.shape[1]):
     feat_channel = batched_feats[:, i:i+1, :, :]  # [1, 1, 48, 48]
-    
-    upsampled = F.interpolate(feat_channel, size=(H//4, W//4), mode='bilinear', align_corners=False)
 
-    filtered = gf(lr_gray, upsampled, hr_gray)
+    filtered = gf(lr_gray, feat_channel, hr_gray)
     refined_channels.append(filtered)
 
 refined = torch.cat(refined_channels, dim=1)
@@ -253,7 +251,7 @@ def visualize_features(feats_before, feats_after, num_channels=8):
     plt.close()
 
 # Compare
-up_bilinear = F.interpolate(batched_feats, size=(768, 768), mode='bilinear')
+up_bilinear = F.interpolate(batched_feats, size=(768, 1024), mode='bilinear')
 visualize_features(up_bilinear, refined, num_channels=8)
 
 from sklearn.decomposition import PCA
@@ -274,7 +272,7 @@ def pca_visualization(feats_48, feats_768):
     rgb1 = (rgb1 - rgb1.min()) / (rgb1.max() - rgb1.min())
     rgb2 = (rgb2 - rgb2.min()) / (rgb2.max() - rgb2.min())
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 3))
     ax1.imshow(rgb1)
     ax1.set_title('Original Features (PCA)')
     ax2.imshow(rgb2)

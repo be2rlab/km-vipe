@@ -174,7 +174,7 @@ JIAHUI.md
 **.pth
 .models_cache/*
 **.mp4
-weights/*
+weights/
 **.txt
 tum_results
 tracker_viz/
