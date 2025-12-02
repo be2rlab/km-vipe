@@ -10,7 +10,7 @@ KM-ViPE tightly couples DINO visual features with geometric constraints through 
 Our results are competitive with state-of-the-art approaches, while existing solutions either operate offline, need depth data and/or odometry estimation, or lack dynamic scene robustness. KM-ViPE benefits from internet-scale training and uniquely combines online operation, uncalibrated monocular input, and robust handling of dynamic scenes, which makes it a good fit for autonomous robotics and AR/VR applications and advances practical spatial intelligence capabilities for embodied AI.
 
 
-**[Arxiv](https://research.nvidia.com/labs/toronto-ai/vipe/assets/paper.pdf)**
+**[Arxiv](https://arxiv.org/abs/2512.01889)**
 
 ## Installation
 ### Docker
@@ -53,11 +53,14 @@ ViPE is built on top of many great open-source research projects and codebases. 
 If you find KM-ViPE useful in your research or application, please consider citing the following paper:
 
 ```
-@inproceedings{huang2025vipe,
-    title={ViPE: Video Pose Engine for 3D Geometric Perception},
-    author={Huang, Jiahui and Zhou, Qunjie and Rabeti, Hesam and Korovko, Aleksandr and Ling, Huan and Ren, Xuanchi and Shen, Tianchang and Gao, Jun and Slepichev, Dmitry and Lin, Chen-Hsuan and Ren, Jiawei and Xie, Kevin and Biswas, Joydeep and Leal-Taixe, Laura and Fidler, Sanja},
-    booktitle={NVIDIA Research Whitepapers arXiv:2508.10934},
-    year={2025}
+@misc{nasser2025kmvipeonlinetightlycoupled,
+      title={KM-ViPE: Online Tightly Coupled Vision-Language-Geometry Fusion for Open-Vocabulary Semantic SLAM}, 
+      author={Zaid Nasser and Mikhail Iumanov and Tianhao Li and Maxim Popov and Jaafar Mahmoud and Malik Mohrat and Ilya Obrubov and Ekaterina Derevyanka and Ivan Sosin and Sergey Kolyubin},
+      year={2025},
+      eprint={2512.01889},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2512.01889}, 
 }
 ```
 
