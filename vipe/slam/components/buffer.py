@@ -514,7 +514,6 @@ class GraphBuffer:
         )
 
         if self.embeddings is not None and embedding_weight > 0.0:
-            print("Yes we are adding the embedding term!")
             embedding_term = EmbeddingSimilarityTerm(
                 pose_i_inds=pi,
                 pose_j_inds=pj,
