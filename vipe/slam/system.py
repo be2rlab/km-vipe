@@ -158,7 +158,6 @@ class SLAMSystem:
         #     weights_dir = "/home/user/km-vipe/weights/dinov2"
         # else:
         #     print("Not clear model Variant!!!")
-        weights_dir = "/home/user/km-vipe/weights/dinov3"
         self.pca_state_path = Path("/home/user/km-vipe/vipe_results/vipe/pca_basis.pt")
         self._pca_state_saved = False
         self.embedder = EmbeddingsPipeline(
