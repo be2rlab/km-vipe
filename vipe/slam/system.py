@@ -148,9 +148,10 @@ class SLAMSystem:
             print(f"Using depth model: {self.metric_depth.depth_type}")
         else:
             print("No depth model used!!!!")
-        model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV3
-        model_variant: str | DinoV3Variant | DinoV2Variant = DinoV3Variant.VITSP
-        weights_dir = None
+        model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
+        model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
+        weights_dir = "/home/user/km-vipe/weights/dinov2"
+        # weights_dir = None
         # if model_variant == DinoV3Variant:
         #     weights_dir = "/home/user/km-vipe/weights/dinov3"
         # elif model_variant == DinoV2Variant:
