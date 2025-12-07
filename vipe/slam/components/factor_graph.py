@@ -315,7 +315,6 @@ class FactorGraph:
                     counter +=1
 
                 frame_alpha_dict[instance_id] = alpha_val
-            # print(f"Number of filtered masks: {counter}/{len(result[i])}")
             self.alpha.append(frame_alpha_dict)
 
         with torch.cuda.amp.autocast(enabled=False):
@@ -415,11 +414,8 @@ class FactorGraph:
                         ix=dixs,
                     )
                     # weight[:, self.buffer.masks[pis, qis]] = 0.0
-                # _____________________________________________
                 instances_bboxes = self.get_instance_bboxes(self.buffer.instances[pis,qis])
-                # new_weights = torch.ones_like(weight[0])
                 result = self.compute_instance_flow_means(self.buffer.instances[pis,qis],instances_bboxes,delta[0],self.buffer.disps_sens[pis,qis],weight[0])
-                # This alpha_per_instance should be self.alpha
                 local_alpha = []
                 for i in range(len(result)):
                     frame_alpha_dict = {}
@@ -450,10 +446,7 @@ class FactorGraph:
                             counter +=1
 
                         frame_alpha_dict[instance_id] = alpha_val
-                    # print(f"Number of filtered masks: {counter}/{len(result[i])}")
-
                     local_alpha.append(frame_alpha_dict)
-                #_______________________________________________
                 u = 0
                 for i,value in enumerate(v_exp):
                     if value:

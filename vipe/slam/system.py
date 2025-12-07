@@ -155,7 +155,6 @@ class SLAMSystem:
             self.buffer.masks[kf_idx] = buffer_masks
         if instances is not None:
             self.buffer.instances[kf_idx] = instances
-            # print(f"the shape is {instances.shape}")
             self.buffer.visualize_instance_mask(instances[0],f"instanc_masks/image_{kf_idx}.png")
             unique_instances = torch.unique(instances)
 
