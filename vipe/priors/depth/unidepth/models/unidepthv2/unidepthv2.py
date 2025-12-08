@@ -289,6 +289,9 @@ class UniDepthV2(
             camera = camera.crop(left=-pad_left, top=-pad_top, right=-pad_right, bottom=-pad_bottom)
             camera = camera.resize(resize_factor)
 
+        # print(camera.params)
+        # print(f"torch: {camera.params.shape}")
+
         # run model
         _, model_outputs = self.encode_decode(inputs={"image": rgb, "camera": camera}, image_metas=[])
 
@@ -339,6 +342,8 @@ class UniDepthV2(
 
         if inputs.get("camera", None) is not None:
             inputs["rays"] = inputs["camera"].get_rays(shapes=(B, H, W))
+
+        # print(inputs["rays"])
 
         features, tokens = self.pixel_encoder(inputs["image"])
         inputs["features"] = [self.stacking_fn(features[i:j]).contiguous() for i, j in self.slices_encoder_range]
