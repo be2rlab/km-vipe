@@ -22,15 +22,14 @@ DOCKER_COMPOSE_FILES := \
 # ------------------------------------------------------------------------------
 
 RENDER_DISPLAY := $(DISPLAY)
-CACHE_DIR?=/home/jaafar/dev/SBER/data/Cache
-DATA_DIR?=/home/jaafar/dev/SBER/data/Benchmarks
+# DATA_DIR?=$(MKFILE_DIR)/../data
+DATA_DIR?=$(MKFILE_DIR)/../../zaid/datasets
 USER_ID=1000#$(UID)
 GROUP_ID=1000#$(GID)
 DOCKERFILE := Dockerfile
 
 BASE_PARAMETERS := \
 	ROOT_DIR=$(ROOT_DIR) \
-	CACHE_DIR=$(CACHE_DIR) \
 	DATA_DIR=$(DATA_DIR)
 
 # ------------------------------------------------------------------------------
@@ -51,6 +50,10 @@ build:
 	@echo "Building"
 	cd $(ROOT_DIR) && $(BUILD_COMMAND) vipe
 
+build-talk2dino:
+	@echo "Building"
+	cd $(ROOT_DIR) && $(BUILD_COMMAND) talk2dino
+
 
 # ------------------------------------------------------------------------------
 #                              RUNNING COMMANDS
@@ -61,6 +64,12 @@ run:
 	cd $(ROOT_DIR) && \
 	export $(BASE_PARAMETERS) && \
 	$(RUN_COMMAND) vipe
+
+run-talk2dino:
+	@echo "Running"
+	cd $(ROOT_DIR) && \
+	export $(BASE_PARAMETERS) && \
+	$(RUN_COMMAND) talk2dino
 
 # ------------------------------------------------------------------------------
 #                             AUXILIARY COMMANDS

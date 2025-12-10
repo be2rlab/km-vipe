@@ -9,7 +9,40 @@ services:
     ipc: host
     environment:
       - QT_X11_NO_MITSHM=1
-      - NVIDIA_VISIBLE_DEVICES=all     # <-- only use cuda:1
+      - CUDA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - DISPLAY=$DISPLAY
+      - VGL_DISPLAY=${RENDER_DISPLAY:-":1"}
+    volumes:
+      - /tmp/.X11-unix/:/tmp/.X11-unix
+      - $ROOT_DIR/:/home/user/km-vipe
+      - .cache/:/home/user/.cache/
+      - .models_cache/:/root/.cache/
+      - $DATA_DIR/:/data
+      - ./export/:/export
+      - ./eval/:/eval
+    runtime: nvidia
+    privileged: true
+    command: bash
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']       # <-- pin to GPU 1
+              capabilities: [gpu]
+    
+  talk2dino:
+    build:
+      context: ./
+      dockerfile: ./docker/talk2dino.Dockerfile
+    image: talk2dino:latest
+    restart: unless-stopped
+    network_mode: host
+    ipc: host
+    environment:
+      - QT_X11_NO_MITSHM=1
+      - CUDA_VISIBLE_DEVICES=1     # <-- only use cuda:1
       - NVIDIA_DRIVER_CAPABILITIES=all
       - DISPLAY=$DISPLAY
       - VGL_DISPLAY=${RENDER_DISPLAY:-":1"}
@@ -22,11 +55,3 @@ services:
     runtime: nvidia
     privileged: true
     command: bash
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['0']       # <-- pin to GPU 1
-              capabilities: [gpu]
