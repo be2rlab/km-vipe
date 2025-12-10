@@ -124,6 +124,8 @@ class Solver:
         for term, kernel in zip(self.terms, self.kernels):
             # Compute the newest term formulation
             term.update(self)
+            if not term.is_active():
+                continue
             term_return = term.forward(variables, jacobian=True)
             term_group_names = list(term.group_names().difference(fully_fixed_groups))
 

@@ -20,12 +20,14 @@
 
 import logging
 
+from typing import Any
+
 import numpy as np
 import rerun as rr
 import torch
 
 from einops import rearrange
-from omegaconf.dictconfig import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from vipe.ext import slam_ext
 from vipe.ext.lietorch import SE3
@@ -73,6 +75,15 @@ class GraphBuffer:
         self.ba_config = ba_config
         self.sparse_tracks = sparse_tracks
         self.camera_type = camera_type
+        embedding_debug_cfg = getattr(self.ba_config, "embedding_debug", None)
+        self.embedding_debug_options: dict[str, Any] | None = None
+        if embedding_debug_cfg not in (None, "null"):
+            if isinstance(embedding_debug_cfg, DictConfig):
+                self.embedding_debug_options = OmegaConf.to_container(embedding_debug_cfg, resolve=True)
+            elif isinstance(embedding_debug_cfg, dict):
+                self.embedding_debug_options = dict(embedding_debug_cfg)
+            else:
+                self.embedding_debug_options = {"enabled": bool(embedding_debug_cfg)}
 
         assert self.height % 8 == 0 and self.width % 8 == 0
 
@@ -317,9 +328,7 @@ class GraphBuffer:
         for frame_idx in frames_to_update:
             focal_length = self.intrinsics[0][0].item()
             depth_input = DepthEstimationInput(
-                rgb=self.images[frame_idx].moveaxis(1, -1).float(),
-                focal_length=focal_length,
-                index= frame_idx
+                rgb=self.images[frame_idx].moveaxis(1, -1).float(), focal_length=focal_length, index=frame_idx
             )
             disp_sens = depth_model.estimate(depth_input).metric_depth
             disp_sens = disp_sens[:, 3::8, 3::8]
@@ -480,29 +489,43 @@ class GraphBuffer:
             )
         )
 
+        embedding_term_activation_iter = n_iters
+        embedding_term = None
         embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
+        embedding_weight_map: torch.Tensor | None = None
         if self.embeddings is not None and embedding_weight > 0.0:
-            embedding_valid = (
-                self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
+            embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
+            dense_h, dense_w = self.height // 8, self.width // 8
+            per_pixel_weight = rearrange(
+                weight.detach(),
+                "nv (h w) c -> nv h w c",
+                h=dense_h,
+                w=dense_w,
+                c=2,
+            ).mean(dim=-1)
+            embedding_weight_map = embedding_weight * per_pixel_weight
+            embedding_term = EmbeddingSimilarityTerm(
+                pose_i_inds=pi,
+                pose_j_inds=pj,
+                rig_i_inds=qi,
+                rig_j_inds=qj,
+                dense_disp_i_inds=di,
+                dense_disp_j_inds=dj,
+                embeddings=self.flattened_embeddings,
+                embedding_valid_mask=embedding_valid,
+                weight=embedding_weight_map,
+                intrinsics=None,
+                intrinsics_factor=8.0,
+                rig=None,
+                image_size=(self.height // 8, self.width // 8),
+                camera_type=self.camera_type,
+                debug_options=self.embedding_debug_options,
             )
-            solver.add_term(
-                EmbeddingSimilarityTerm(
-                    pose_i_inds=pi,
-                    pose_j_inds=pj,
-                    rig_i_inds=qi,
-                    rig_j_inds=qj,
-                    dense_disp_i_inds=di,
-                    dense_disp_j_inds=dj,
-                    embeddings=self.flattened_embeddings,
-                    embedding_valid_mask=embedding_valid,
-                    weight=embedding_weight,
-                    intrinsics=None,
-                    intrinsics_factor=8.0,
-                    rig=None,
-                    image_size=(self.height // 8, self.width // 8),
-                    camera_type=self.camera_type,
-                )
-            )
+            solver.add_term(embedding_term)
+            raw_fine_iters = getattr(self.ba_config, "embedding_fine_iters", None)
+            embedding_fine_iters_cfg = n_iters if raw_fine_iters in (None, "null") else int(raw_fine_iters)
+            embedding_fine_iters = n_iters if embedding_fine_iters_cfg <= 0 else min(embedding_fine_iters_cfg, n_iters)
+            embedding_term_activation_iter = max(0, n_iters - embedding_fine_iters)
 
         if self.sparse_tracks.enabled:
             # This does not support cross-view tracking yet.
@@ -593,7 +616,9 @@ class GraphBuffer:
         disps_flattened = rearrange(self.flattened_disps, "nv h w -> nv (h w)")
 
         ba_energy = []
-        for _ in range(n_iters):
+        for iter_idx in range(n_iters):
+            if embedding_term is not None:
+                embedding_term.set_active(iter_idx >= embedding_term_activation_iter)
             cur_energy = solver.run_inplace(
                 {
                     "pose": SE3(self.poses),
@@ -603,9 +628,8 @@ class GraphBuffer:
                 }
             )
             ba_energy.append(cur_energy)
-
-        if verbose:
-            logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+            if verbose:
+                logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
 
         self.disps.clamp_(min=0.001)
 
@@ -691,6 +715,11 @@ class GraphBuffer:
         n_frames, n_views, ht, wd, _ = images.shape
 
         pts_list, mask_list = [], []
+        embedding_list: list[torch.Tensor] = []
+        embedding_mask_list: list[torch.Tensor] = []
+        has_embeddings = self.embeddings is not None
+        has_embedding_mask = self.embedding_valid_mask is not None
+
         for v in range(self.n_views):
             c2w_view: SE3 = c2w_se3 * SE3(self.rig[v])[None]  # type: ignore
             disps_v = self.disps[t_range, v].contiguous()  # (n_frames, ht, wd)
@@ -722,11 +751,22 @@ class GraphBuffer:
             pts_list.append(pts)
             mask_list.append(masks)
 
+            if has_embeddings:
+                view_embeddings = self.embeddings[t_range, v]  # (n_frames, C, ht, wd)
+                view_embeddings = view_embeddings.permute(0, 2, 3, 1).contiguous()  # (n_frames, ht, wd, C)
+                embedding_list.append(view_embeddings)
+                if has_embedding_mask:
+                    embedding_mask_list.append(self.embedding_valid_mask[t_range, v])
+                else:
+                    embedding_mask_list.append(torch.ones_like(masks))
+
         return SLAMMap.from_masked_dense_disp(
             torch.stack(pts_list, dim=1),
             images,
             torch.stack(mask_list, dim=1),
             self.tstamp[t_range],
+            embeddings=torch.stack(embedding_list, dim=1) if has_embeddings else None,
+            embedding_mask=torch.stack(embedding_mask_list, dim=1) if has_embeddings else None,
         )
 
     def log_tracks(self):
@@ -813,16 +853,16 @@ class GraphBuffer:
                 pcd_xyz, pcd_rgb = current_map.get_dense_disp_pcd(di, v)
                 image = self.images[int(didx), v, :, 3::8, 3::8].moveaxis(0, -1).cpu().numpy()
 
-            #     rr.log(
-            #         f"world/kf_{didx:04d}/v{v}",
-            #         rr.Transform3D(translation=rig_mat[:3, 3], mat3x3=rig_mat[:3, :3]),
-            #         rr.Pinhole(
-            #             resolution=[dd_wd, dd_ht],
-            #             image_from_camera=self.K_dense_disp[v],
-            #             camera_xyz=rr.ViewCoordinates.RDF,
-            #         ),
-            #         rr.Image((image * 255).astype(np.uint8)).compress(),
-            #     )
+                #     rr.log(
+                #         f"world/kf_{didx:04d}/v{v}",
+                #         rr.Transform3D(translation=rig_mat[:3, 3], mat3x3=rig_mat[:3, :3]),
+                #         rr.Pinhole(
+                #             resolution=[dd_wd, dd_ht],
+                #             image_from_camera=self.K_dense_disp[v],
+                #             camera_xyz=rr.ViewCoordinates.RDF,
+                #         ),
+                #         rr.Image((image * 255).astype(np.uint8)).compress(),
+                #     )
                 rr.log(
                     f"world/kp_{didx:04d}/v{v}",
                     rr.Points3D(

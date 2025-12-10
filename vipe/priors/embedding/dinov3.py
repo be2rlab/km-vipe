@@ -40,17 +40,31 @@ class PyramidUpsampler:
         mode: Literal["bilinear", "bicubic"] = "bilinear",
     ) -> Tensor:
         """Upsample features to target size using single-scale interpolation."""
+        device = features.device
+        h, w = features.shape[:2] if features.dim() == 3 else features.shape[2:4]
+
+        if (h, w) == target_size:
+            return features if features.dim() == 3 else features.squeeze(0).permute(1, 2, 0)
+
         if features.dim() == 3:
             features = features.permute(2, 0, 1).unsqueeze(0)  # [1, D, H, W]
 
-        # --- OPTIMIZATION ---
-        # Handle align_corners=False only for 'bilinear'
-        interp_kwargs = {"size": target_size, "mode": mode}
+        interp_kwargs = {"size": target_size, "mode": mode, "antialias": True}
         if mode == "bilinear":
             interp_kwargs["align_corners"] = False
 
         upsampled = F.interpolate(features, **interp_kwargs)
-        return upsampled.squeeze(0).permute(1, 2, 0).contiguous()  # [H', W', D]
+        del features
+
+        result = upsampled.squeeze(0).permute(1, 2, 0)
+        if result.is_contiguous():
+            result = result.contiguous()
+
+        del upsampled
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        return result
 
     def upsample_pyramid(self, features_pyramid: List[Tensor], target_size: Tuple[int, int]) -> Tensor:
         """
@@ -65,35 +79,54 @@ class PyramidUpsampler:
             raise ValueError("Empty feature pyramid")
 
         D = features_pyramid[0].shape[-1]
-        accumulated = torch.zeros(target_size[0], target_size[1], D, device=self.device)
-        weights = torch.zeros(target_size[0], target_size[1], 1, device=self.device)
 
+        # Use the same device as input features
+        device = features_pyramid[0].device
+
+        # Initialize accumulators
+        accumulated = torch.zeros(target_size[0], target_size[1], D, device=device)
+        weights = (
+            torch.zeros(target_size[0], target_size[1], 1, device=device)
+            if self.blend_mode in ["weighted", "average"]
+            else None
+        )
         for i, feats in enumerate(features_pyramid):
             upsampled = self.upsample_single_scale(feats, target_size, mode="bilinear")
 
             current_blend_mode = self.blend_mode
-            # --- OPTIMIZATION ---
-            # Allow method override via instance property for flexibility
+
             if current_blend_mode == "weighted":
                 scale_weight = self.scales[i] if i < len(self.scales) else 1.0
-                accumulated += upsampled * scale_weight
-                weights += scale_weight
+                accumulated.add_(upsampled, alpha=scale_weight)
+                weights.add_(scale_weight)
+
             elif current_blend_mode == "average":
-                accumulated += upsampled
-                weights += 1.0
+                accumulated.add_(upsampled)
+                weights.add_(1.0)
+
             elif current_blend_mode == "max":
-                # Max blending doesn't use weights, but we must handle the first iter
                 if i == 0:
-                    accumulated = upsampled
+                    accumulated = upsampled.clone()
                 else:
-                    accumulated = torch.maximum(accumulated, upsampled)
+                    torch.maximum(accumulated, upsampled, out=accumulated)
             else:
                 raise ValueError(f"Unknown blend mode: {current_blend_mode}")
 
+            del upsampled
+
+            if device.type == "cuda" and (i + 1) % 3 == 0:
+                torch.cuda.empty_cache()
+
         if current_blend_mode in ["weighted", "average"]:
-            return accumulated / (weights + 1e-8)
-        else:  # 'max' mode
-            return accumulated
+            result = accumulated.div_(weights + 1e-8)
+            del weights
+        else:
+            result = accumulated
+
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        return result
 
 
 # --- DINOv3 Config (Unchanged) ---
@@ -497,7 +530,7 @@ class DINOv3EmbeddingEngine:
 
         _, base_h, base_w = base_tensor.shape
         features_pyramid = []
-        print(f"  Multi-scale feature extraction (Base: {base_h}x{base_w}, Scales: {scales}):")
+        # print(f"  Multi-scale feature extraction (Base: {base_h}x{base_w}, Scales: {scales}):")
 
         amp_dtype = torch.bfloat16 if self.device == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
 
@@ -523,13 +556,10 @@ class DINOv3EmbeddingEngine:
                 )
                 feats = feats_list[0][0]  # [D, h_i, w_i]
                 feat = feats.permute(1, 2, 0).contiguous()  # [h_i, w_i, D]
-                features_pyramid.append(feat)
-            print(f"    Scale {scale} ({scale_idx + 1}/{len(scales)}) -> {feat.shape}")
+                features_pyramid.append(feat.detach())
+            # print(f"    Scale {scale} ({scale_idx + 1}/{len(scales)}) -> {feat.shape}")
         return features_pyramid
 
-    # --- OPTIMIZATION ---
-    # This method is now a unified frontend for the internal self.upsampler.
-    # It no longer contains redundant logic for pyramid upsampling.
     def upsample_features(
         self,
         features: Union[Tensor, List[Tensor]],
