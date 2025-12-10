@@ -18,6 +18,8 @@ attrs==24.2.0
     #   rerun-sdk
 beautifulsoup4==4.13.3
     # via gdown
+braceexpand==0.1.7
+    # via webdataset
 calmsize==0.1.3
     # via python-pycg
 certifi==2022.12.7
@@ -30,6 +32,8 @@ click==8.1.8
     # via
     #   -r envs/requirements.in
     #   ray
+clip @ git+https://github.com/openai/CLIP.git@dcba3cb2e2827b402d2701e7e1c7d9fed8a20ef1
+    # via -r envs/requirements.in
 colorama==0.4.6
     # via evo
 colorlog==6.9.0
@@ -61,6 +65,10 @@ fsspec==2024.6.1
     # via
     #   huggingface-hub
     #   torch
+ftfy==6.3.1
+    # via
+    #   -r envs/requirements.in
+    #   clip
 gdown==5.2.0
     # via -r envs/requirements.in
 h11==0.16.0
@@ -86,6 +94,8 @@ imageio-ffmpeg==0.6.0
     # via imageio
 jinja2==3.1.4
     # via torch
+joblib==1.5.2
+    # via scikit-learn
 jsonschema==4.23.0
     # via
     #   ray
@@ -120,6 +130,7 @@ matplotlib==3.9.0
     #   evo
     #   python-pycg
     #   seaborn
+    #   ultralytics
 mdurl==0.1.2
     # via markdown-it-py
 mpmath==1.3.0
@@ -162,6 +173,7 @@ numpy==2.1.2
     #   rerun-sdk
     #   rosbags
     #   scikit-image
+    #   scikit-learn
     #   scipy
     #   seaborn
     #   shapely
@@ -169,8 +181,11 @@ numpy==2.1.2
     #   torchvision
     #   transformers
     #   trimesh
+    #   ultralytics
+    #   ultralytics-thop
     #   vhacdx
     #   viser
+    #   webdataset
     #   yourdfpy
 nvidia-cublas-cu12==12.8.3.14
     # via
@@ -219,11 +234,13 @@ omegaconf==2.3.0
 opencv-python==4.11.0.86
     # via
     #   -r envs/requirements.in
+    #   ultralytics
     #   viser
 openexr==3.2.4
     # via -r envs/requirements.in
 packaging==24.1
     # via
+    #   clip
     #   huggingface-hub
     #   hydra-core
     #   kornia
@@ -246,13 +263,19 @@ pillow==11.0.0
     #   scikit-image
     #   torchvision
     #   trimesh
+    #   ultralytics
 plyfile==1.1
     # via python-pycg
+polars==1.35.2
+    # via ultralytics
+polars-runtime-32==1.35.2
+    # via polars
 protobuf==6.30.0rc1
     # via ray
 psutil==6.0.0
     # via
     #   imageio
+    #   ultralytics
     #   viser
 pyarrow==17.0.0
     # via rerun-sdk
@@ -281,6 +304,7 @@ pytz==2025.2
     # via pandas
 pyyaml==6.0.2
     # via
+    #   -r envs/requirements.in
     #   evo
     #   huggingface-hub
     #   omegaconf
@@ -288,6 +312,8 @@ pyyaml==6.0.2
     #   ray
     #   timm
     #   transformers
+    #   ultralytics
+    #   webdataset
 ray==2.42.1
     # via -r envs/requirements.in
 referencing==0.36.2
@@ -295,13 +321,18 @@ referencing==0.36.2
     #   jsonschema
     #   jsonschema-specifications
 regex==2024.9.11
-    # via transformers
+    # via
+    #   -r envs/requirements.in
+    #   clip
+    #   transformers
 requests==2.28.1
     # via
+    #   -r envs/requirements.in
     #   gdown
     #   huggingface-hub
     #   ray
     #   transformers
+    #   ultralytics
     #   viser
 rerun-sdk==0.22.0
     # via -r envs/requirements.in
@@ -326,13 +357,19 @@ safetensors==0.4.5
     #   timm
     #   transformers
 scikit-image==0.25.2
-    # via viser
+    # via
+    #   -r envs/requirements.in
+    #   viser
+scikit-learn==1.7.2
+    # via -r envs/requirements.in
 scipy==1.15.1
     # via
     #   evo
     #   python-pycg
     #   scikit-image
+    #   scikit-learn
     #   trimesh
+    #   ultralytics
     #   viser
 screeninfo==0.8.1
     # via python-pycg
@@ -356,6 +393,8 @@ svg-path==7.0
     # via trimesh
 sympy==1.13.3
     # via torch
+threadpoolctl==3.6.0
+    # via scikit-learn
 tifffile==2025.5.10
     # via scikit-image
 timm==1.0.14
@@ -365,16 +404,22 @@ tokenizers==0.21.0
 torch==2.7.0+cu128
     # via
     #   -r envs/requirements.in
+    #   clip
     #   kornia
     #   timm
     #   torchvision
+    #   ultralytics
+    #   ultralytics-thop
 torchvision==0.22.0+cu128
     # via
     #   -r envs/requirements.in
+    #   clip
     #   timm
+    #   ultralytics
 tqdm==4.66.5
     # via
     #   -r envs/requirements.in
+    #   clip
     #   gdown
     #   huggingface-hub
     #   python-pycg
@@ -401,6 +446,10 @@ typing-extensions==4.12.2
     #   torch
 tzdata==2025.2
     # via pandas
+ultralytics==8.3.227
+    # via -r envs/requirements.in
+ultralytics-thop==2.0.18
+    # via ultralytics
 urllib3==1.26.13
     # via requests
 usd-core==25.2.post1
@@ -408,6 +457,10 @@ usd-core==25.2.post1
 vhacdx==0.0.8.post2
     # via trimesh
 viser==1.0.1
+    # via -r envs/requirements.in
+wcwidth==0.2.14
+    # via ftfy
+webdataset==1.0.2
     # via -r envs/requirements.in
 websockets==15.0.1
     # via viser

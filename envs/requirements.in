@@ -22,3 +22,13 @@ ray
 ninja
 viser
 evo
+ultralytics
+scikit-learn
+ftfy 
+regex 
+tqdm
+git+https://github.com/openai/CLIP.git
+scikit-image 
+pyyaml 
+requests 
+webdataset
