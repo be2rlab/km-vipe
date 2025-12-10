@@ -9,16 +9,38 @@ from torchvision import transforms
 from PIL import Image
 import requests
 from skimage import data
+import sys
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-REPO_DIR = "dino/dinov3/"
+dino_version = 'v2'
 
-backbone_weights = f"./weights/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
-weights = f"./weights/dinov3/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
-
-# DINOv3
-dino_backbone, tokenizer = torch.hub.load(REPO_DIR, 'dinov3_vitl16_dinotxt_tet1280d20h24l', source='local', weights=weights, backbone_weights=backbone_weights)
+if dino_version == 'v2':
+    REPO_PATH = "dino/dinov2" # Specify a local path to the repository (or use installed package instead)
+    sys.path.append(REPO_PATH)
+    
+    from dinov2.hub.dinotxt import dinov2_vitl14_reg4_dinotxt_tet1280d20h24l, get_tokenizer
+    
+    # repo_dir = "dino/dinov2/"
+    # model_name = "dinov3_vitl16_dinotxt_tet1280d20h24l"
+    # backbone_weights = f"./weights/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    # weights = f"./weights/dinov3/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
+    
+    dino_backbone = dinov2_vitl14_reg4_dinotxt_tet1280d20h24l().to(device)
+    tokenizer = get_tokenizer()
+    
+    
+elif dino_version == 'v3':
+    repo_dir = "dino/dinov3/"
+    model_name = "dinov3_vitl16_dinotxt_tet1280d20h24l"
+    backbone_weights = f"./weights/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    weights = f"./weights/dinov3/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth"
+    
+    # DINOv3
+    dino_backbone, tokenizer = torch.hub.load(repo_dir, model_name, source='local', weights=weights, backbone_weights=backbone_weights)
+    
+else:
+    raise ValueError(f"Unsupported DINO version: {dino_version}")
 
 # ---- Example dataset ----
 images = {
