@@ -1,3 +1,4 @@
+
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -43,6 +44,7 @@ from ..interface import SLAMMap
 from ..maths import geom
 from ..maths.retractor import DenseDispRetractor, IntrinsicsRetractor, PoseRetractor, RigRotationOnlyRetractor
 from .sparse_tracks import SparseTracks
+from ..ba.kernel import AdaptiveBarronRobustKernel
 
 
 logger = logging.getLogger(__name__)
@@ -472,28 +474,12 @@ class GraphBuffer:
         pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
 
         solver = Solver(compute_energy=verbose)
-        solver.add_term(
-            DenseDepthFlowTerm(
-                pose_i_inds=pi,
-                pose_j_inds=pj,
-                rig_i_inds=qi,
-                rig_j_inds=qj,
-                dense_disp_i_inds=di,
-                target=target,
-                weight=weight_dense_disp * weight,
-                intrinsics=None,
-                intrinsics_factor=8.0,
-                rig=None,
-                image_size=(self.height // 8, self.width // 8),
-                camera_type=self.camera_type,
-            )
-        )
 
         embedding_term_activation_iter = n_iters
         embedding_term = None
         embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
         embedding_weight_map: torch.Tensor | None = None
-        if self.embeddings is not None and embedding_weight > 0.0:
+        if self.embeddings is not None:
             embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
             dense_h, dense_w = self.height // 8, self.width // 8
             per_pixel_weight = rearrange(
@@ -504,6 +490,30 @@ class GraphBuffer:
                 c=2,
             ).mean(dim=-1)
             embedding_weight_map = embedding_weight * per_pixel_weight
+
+        solver.add_term(
+            DenseDepthFlowTerm(
+                pose_i_inds=pi,
+                pose_j_inds=pj,
+                rig_i_inds=qi,
+                rig_j_inds=qj,
+                dense_disp_i_inds=di,
+                dense_disp_j_inds=dj,
+                embeddings=self.flattened_embeddings if self.embeddings is not None else None,
+                embedding_valid_mask=embedding_valid if self.embeddings is not None else None,
+                embedding_weight=embedding_weight_map if self.embeddings is not None else None,
+                target=target,
+                weight=weight_dense_disp * weight,
+                debug_options=self.embedding_debug_options if self.embeddings is not None else None,
+                intrinsics=None,
+                intrinsics_factor=8.0,
+                rig=None,
+                image_size=(self.height // 8, self.width // 8),
+                camera_type=self.camera_type
+            ),AdaptiveBarronRobustKernel()
+        )
+
+        if self.embeddings is not None and embedding_weight > 0.0:
             embedding_term = EmbeddingSimilarityTerm(
                 pose_i_inds=pi,
                 pose_j_inds=pj,
@@ -715,11 +725,6 @@ class GraphBuffer:
         n_frames, n_views, ht, wd, _ = images.shape
 
         pts_list, mask_list = [], []
-        embedding_list: list[torch.Tensor] = []
-        embedding_mask_list: list[torch.Tensor] = []
-        has_embeddings = self.embeddings is not None
-        has_embedding_mask = self.embedding_valid_mask is not None
-
         for v in range(self.n_views):
             c2w_view: SE3 = c2w_se3 * SE3(self.rig[v])[None]  # type: ignore
             disps_v = self.disps[t_range, v].contiguous()  # (n_frames, ht, wd)
@@ -751,22 +756,11 @@ class GraphBuffer:
             pts_list.append(pts)
             mask_list.append(masks)
 
-            if has_embeddings:
-                view_embeddings = self.embeddings[t_range, v]  # (n_frames, C, ht, wd)
-                view_embeddings = view_embeddings.permute(0, 2, 3, 1).contiguous()  # (n_frames, ht, wd, C)
-                embedding_list.append(view_embeddings)
-                if has_embedding_mask:
-                    embedding_mask_list.append(self.embedding_valid_mask[t_range, v])
-                else:
-                    embedding_mask_list.append(torch.ones_like(masks))
-
         return SLAMMap.from_masked_dense_disp(
             torch.stack(pts_list, dim=1),
             images,
             torch.stack(mask_list, dim=1),
             self.tstamp[t_range],
-            embeddings=torch.stack(embedding_list, dim=1) if has_embeddings else None,
-            embedding_mask=torch.stack(embedding_mask_list, dim=1) if has_embeddings else None,
         )
 
     def log_tracks(self):

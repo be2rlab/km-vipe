@@ -4,15 +4,15 @@ export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/tum
 export RESULTS_FOLDER=$ROOT_DIR/tum_results
 export SCENE_NAMES=(
-    rgbd_dataset_freiburg1_360
-    rgbd_dataset_freiburg1_desk
-    rgbd_dataset_freiburg1_desk2
-    rgbd_dataset_freiburg1_floor
-    rgbd_dataset_freiburg1_plant
-    rgbd_dataset_freiburg1_room
-    rgbd_dataset_freiburg1_rpy
-    rgbd_dataset_freiburg1_teddy
-    rgbd_dataset_freiburg1_xyz
+    # rgbd_dataset_freiburg1_360
+    # rgbd_dataset_freiburg1_desk
+    # rgbd_dataset_freiburg1_desk2
+    # rgbd_dataset_freiburg1_floor
+    # rgbd_dataset_freiburg1_plant
+    # rgbd_dataset_freiburg1_room
+    # rgbd_dataset_freiburg1_rpy
+    # rgbd_dataset_freiburg1_teddy
+    # rgbd_dataset_freiburg1_xyz
     rgbd_dataset_freiburg3_walking_xyz
     rgbd_dataset_freiburg3_walking_rpy
     rgbd_dataset_freiburg3_walking_halfsphere
@@ -28,7 +28,7 @@ for SCENE_NAME in ${SCENE_NAMES[*]}
 do
     printf "Running scene:   %s\n" "$SCENE_NAME"
 
-    python3 $ROOT_DIR/run.py \
+    CUDA_VISIBLE_DEVICES=1 python3 $ROOT_DIR/run.py \
         pipeline=tum \
         streams=frame_dir_stream \
         streams.base_path=$GT_FOLDER/$SCENE_NAME/rgb \

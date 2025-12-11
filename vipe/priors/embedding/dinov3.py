@@ -256,9 +256,10 @@ class DINOv3EmbeddingEngine:
         """Load DINOv3 model via torch.hub with optional local weights."""
         try:
             model = torch.hub.load(
-                repo_or_dir="facebookresearch/dinov3",
+                repo_or_dir="/home/user/km-vipe/dino/dinov3",
                 model=hub_id,
-                source="github",
+                source="local",
+                weights=weights_path,
             )
         except Exception as e:
             # --- OPTIMIZATION ---
