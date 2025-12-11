@@ -60,6 +60,7 @@ class ConcreteTermEvalReturn(TermEvalReturn):
     J: dict[str, SparseBlockMatrix]  # group_name -> (n_occ, res_dim, manifold_dim)
     w: torch.Tensor  # (n_terms, res_dim, )
     r: torch.Tensor  # (n_terms, res_dim, )
+    alpha: torch.Tensor | None = None
 
     # n_occ = number of occurrences of this group_name in all the terms.
     # i.e. the number of blocks in the sparse Jacobian matrix with size n_terms x n_vars
@@ -80,7 +81,7 @@ class ConcreteTermEvalReturn(TermEvalReturn):
         self.J[group_name] = j_group.subset(keep_mask)
 
     def apply_robust_kernel(self, kernel: RobustKernel):
-        robust_weight = kernel.apply(self.r)
+        robust_weight = kernel.apply(self.r,self.alpha)
         self.w = self.w * robust_weight
 
     def residual(self) -> torch.Tensor:
@@ -127,6 +128,14 @@ class DenseDepthFlowTerm(SolverTerm):
         rig: SE3 | None,
         image_size: tuple[int, int],
         camera_type: CameraType,
+        dense_disp_j_inds: torch.Tensor,
+        embeddings: torch.Tensor,
+        embedding_weight: torch.Tensor | float,
+        embedding_valid_mask: torch.Tensor | None = None,
+        chunk_size: int = 4,
+        residual_scale: float = 1.0,
+        use_photometric_residual: bool = False,
+        debug_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
 
@@ -136,12 +145,18 @@ class DenseDepthFlowTerm(SolverTerm):
         assert rig_i_inds.shape == (self.n_terms,)
         assert rig_j_inds.shape == (self.n_terms,)
         assert dense_disp_i_inds.shape == (self.n_terms,)
+        assert dense_disp_j_inds.shape == (self.n_terms,)
+
 
         self.pose_i_inds = pose_i_inds
         self.pose_j_inds = pose_j_inds
         self.rig_i_inds = rig_i_inds
         self.rig_j_inds = rig_j_inds
         self.dense_disp_i_inds = dense_disp_i_inds
+        self.dense_disp_j_inds = dense_disp_j_inds
+        self.chunk_size = chunk_size
+        self.residual_scale = residual_scale
+        self.use_photometric_residual = use_photometric_residual
         self.image_size = image_size
         self.camera_type = camera_type
 
@@ -152,6 +167,48 @@ class DenseDepthFlowTerm(SolverTerm):
         self.intrinsics = intrinsics.reshape(-1, 4) if intrinsics is not None else None  # (Q, 4)
         self.intrinsics_factor = intrinsics_factor
         self.rig = rig
+        self.alpha = None
+
+        # Store raw embeddings and a pre-normalized copy for the *source* (no sampling on source)
+        self.embeddings = embeddings
+        if embeddings is not None:
+            assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
+            self.embeddings = embeddings.float()
+            self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
+
+            self.embedding_valid_mask = embedding_valid_mask
+            if embedding_valid_mask is not None:
+                assert embedding_valid_mask.dim() == 3, (
+                    f"embedding_valid_mask must be 3D (N_views, H, W), got {embedding_valid_mask.dim()}D"
+                )
+                assert embedding_valid_mask.shape[1:] == image_size, (
+                    f"embedding_valid_mask spatial dims {embedding_valid_mask.shape[1:]} must match image_size {image_size}"
+                )
+
+
+            self.height, self.width = image_size
+            assert embeddings.shape[2] == self.height and embeddings.shape[3] == self.width
+            self.embedding_dim = embeddings.shape[1]
+            self.embedding_weight, self._has_weight_map = self._prepare_embedding_weight(embedding_weight)
+
+            self._debug_options = debug_options or {}
+            self.debug_enabled = self._parse_bool(self._debug_options.get("enabled", False))
+            self.debug_log_every = max(1, self._parse_int(self._debug_options.get("log_every", 1)))
+            self.debug_log_stats = self._parse_bool(self._debug_options.get("log_stats", self.debug_enabled))
+            self.debug_visualize = self.debug_enabled and self._parse_bool(self._debug_options.get("save_heatmaps", False))
+            self.debug_samples_per_snapshot = max(1, self._parse_int(self._debug_options.get("samples_per_snapshot", 1)))
+            self.debug_max_snapshots = max(0, self._parse_int(self._debug_options.get("max_snapshots", 0)))
+            output_dir_value = self._debug_options.get("output_dir", "vipe_results/debug_embedding")
+            self.debug_dir = (
+                Path(output_dir_value)
+                if (self.debug_visualize and self.debug_max_snapshots > 0 and output_dir_value not in (None, "null"))
+                else None
+            )
+            if self.debug_dir is not None:
+                self.debug_dir.mkdir(parents=True, exist_ok=True)
+            self._forward_calls = 0
+            self._debug_saved = 0
+            self._active = True
 
     def group_names(self) -> set[str]:
         names = {"pose", "dense_disp"}
@@ -246,11 +303,225 @@ class DenseDepthFlowTerm(SolverTerm):
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
+        if self.embeddings is not None:
+            emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(coords,valid,'cuda:0')
+            emedding_redisdual = 1- emedding_redisdual
+            self.calculate_alpha(emedding_redisdual,embedding_residual_weights)
+            self.alpha = torch.repeat_interleave(self.alpha, 2, dim=1)
         return ConcreteTermEvalReturn(
             J=J_dict,
             w=weight,
             r=rearrange(coords - self.target, "n hw c -> n (hw c)", c=2),
+            alpha = self.alpha
         )
+    
+
+    def compute_embedding_residuals(self, coords,valid,device) -> TermEvalReturn:
+
+        coords = coords.view(self.n_terms, self.height, self.width, 2)
+        valid = valid.view(self.n_terms, self.height, self.width, 1)
+
+        pixel_count = self.height * self.width
+        dtype = coords.dtype
+
+        # Pre-allocate outputs
+        residual = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
+        weight = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
+
+
+        # Chunk to save memory
+        for chunk_start in range(0, self.n_terms, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, self.n_terms)
+            cs = slice(chunk_start, chunk_end)
+            cs_offset = slice(chunk_start + self.n_terms, chunk_end + self.n_terms)
+
+            src_idx = self.dense_disp_i_inds[cs]
+            tgt_idx = self.dense_disp_j_inds[cs]
+
+            # Normalized source (no sampling)
+            source_norm = self.embeddings_norm[src_idx]  # (N, C, H, W)
+
+            # Target: raw features (will be normalized AFTER sampling)
+            target_raw_full = self.embeddings[tgt_idx]  # (N, C, H, W)
+
+            coords_chunk = coords[cs]  # (N, H, W, 2)
+            valid_chunk = valid[cs]  # (N, H, W, 1)
+
+            # Optional embedding validity masks (src & tgt)
+            if self.embedding_valid_mask is not None:
+                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1)  # (N, H, W, 1)
+                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1)  # (N, H, W, 1)
+                valid_chunk = valid_chunk * src_valid * tgt_valid
+
+            valid_map = valid_chunk.permute(0, 3, 1, 2)  # (N, 1, H, W)
+
+            # Per-pixel weight for this term
+            if self._has_weight_map:
+                base_weight = self.embedding_weight[cs]
+            else:
+                base_weight = self.embedding_weight
+            weight_chunk = base_weight * valid_map.squeeze(1)
+            weight[cs] = weight_chunk.view(-1, pixel_count)
+
+            # Skip if fully invalid
+            if not torch.any(valid_map.view(-1, pixel_count).sum(dim=1) > 0.0):
+                continue
+            # Bilinear sample raw target features (and spatial grads if needed)
+            target_raw_sampled, _, _ = self.bilinear_sample_with_grad(
+                target_raw_full, coords_chunk, return_grad=False
+            )
+            # Residual only path
+            eps = 1e-8
+            u = target_raw_sampled
+            u_norm = u.norm(dim=1, keepdim=True).clamp_min(eps)
+            t_norm = u / u_norm
+            cos_sim = (source_norm * t_norm).sum(dim=1)
+            if self.use_photometric_residual:
+                residual_chunk = self.residual_scale * torch.sqrt(2.0 * (1.0 - cos_sim).clamp(min=0.0))
+            else:
+                residual_chunk = 1.0 - cos_sim
+            residual_chunk = residual_chunk * valid_map.squeeze(1)
+
+            residual[cs] = residual_chunk.view(-1, pixel_count)
+        return residual, weight
+
+    def calculate_alpha(self, embedding_residual, embedding_residual_weights, alpha_min=-10, alpha_max=2):
+        x = embedding_residual
+        
+        # Create a mask for values below 0.6
+        mask_below_threshold = x < 0.4
+        
+        # Normalize x from [0.6, 1] to [0, 1] for values >= 0.6
+        x_normalized = (x - 0.4) / (1 - 0.4)  # This gives range [0, 1] for x in [0.6, 1]
+        x_normalized = torch.clamp(x_normalized, 0, 1)  # Ensure values are within [0, 1]
+        
+        # Apply sigmoid transformation only to values >= 0.6
+        sigmoid_output = (alpha_max - alpha_min) / (1 + torch.exp(-(x_normalized - 0.5) / 0.1)) + alpha_min
+        
+        # Set alpha to -20 for values below 0.6, otherwise use sigmoid output
+        self.alpha = torch.where(mask_below_threshold, torch.tensor(alpha_min, dtype=x.dtype, device=x.device), sigmoid_output)
+
+    # def calculate_alpha(self, embedding_residual,embedding_residual_weights,alpha_min = -20, alpha_max = 2):
+    #         x = embedding_residual
+    #         self.alpha = (alpha_max - alpha_min) / (1 + torch.exp(-(x - 0.5) / 0.1)) + alpha_min
+
+
+    def _prepare_embedding_weight(self, weight: torch.Tensor | float) -> tuple[torch.Tensor, bool]:
+        device = self.embeddings.device
+        dtype = self.embeddings.dtype
+        if isinstance(weight, torch.Tensor):
+            weight_tensor = weight.detach().to(device=device, dtype=dtype)
+            if weight_tensor.ndim == 0:
+                return weight_tensor, False
+            if weight_tensor.ndim == 2:
+                expected = (self.n_terms, self.height * self.width)
+                if weight_tensor.shape != expected:
+                    raise ValueError(
+                        f"Embedding weight tensor must have shape {expected} when 2D, got {tuple(weight_tensor.shape)}"
+                    )
+                return weight_tensor.view(self.n_terms, self.height, self.width).contiguous(), True
+            if weight_tensor.ndim == 3:
+                if tuple(weight_tensor.shape[1:]) != (self.height, self.width):
+                    raise ValueError(
+                        "Embedding weight spatial shape must match image_size; got "
+                        f"{tuple(weight_tensor.shape[1:])} vs {(self.height, self.width)}"
+                    )
+                if weight_tensor.shape[0] == 1 and self.n_terms > 1:
+                    weight_tensor = weight_tensor.expand(self.n_terms, -1, -1)
+                elif weight_tensor.shape[0] != self.n_terms:
+                    raise ValueError(
+                        f"Embedding weight batch dimension must be 1 or {self.n_terms}; got {weight_tensor.shape[0]}"
+                    )
+                return weight_tensor.contiguous(), True
+            raise ValueError(
+                "Embedding weight tensor must be scalar, (n_terms, H*W), or (n_terms, H, W); "
+                f"got ndim={weight_tensor.ndim}"
+            )
+        return torch.tensor(float(weight), device=device, dtype=dtype), False
+
+    @staticmethod
+    def bilinear_sample_with_grad(
+        features: torch.Tensor, coords: torch.Tensor, return_grad: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """
+        Optimized bilinear sampling with analytical gradients.
+
+        Args:
+            features: (N, C, H, W) float32
+            coords:   (N, H, W, 2) in pixel (x, y)
+        Returns:
+            samples: (N, C, H, W)
+            grad_u:  (N, C, H, W) if return_grad else None
+            grad_v:  (N, C, H, W) if return_grad else None
+        """
+        N, C, Hf, Wf = features.shape
+        _, Hc, Wc, _ = coords.shape
+
+        device = features.device
+        u = coords[..., 0]
+        v = coords[..., 1]
+
+        u_clamped = u.clamp(0.0, Wf - 1.0)
+        v_clamped = v.clamp(0.0, Hf - 1.0)
+
+        x0 = u_clamped.floor()
+        y0 = v_clamped.floor()
+        x0_int = x0.long()
+        y0_int = y0.long()
+        x1_int = (x0_int + 1).clamp(max=Wf - 1)
+        y1_int = (y0_int + 1).clamp(max=Hf - 1)
+
+        du = u_clamped - x0
+        dv = v_clamped - y0
+
+        flat_features = features.view(N, C, -1)
+
+        idx_00 = (y0_int * Wf + x0_int).view(N, 1, -1).expand(-1, C, -1)
+        idx_10 = (y0_int * Wf + x1_int).view(N, 1, -1).expand(-1, C, -1)
+        idx_01 = (y1_int * Wf + x0_int).view(N, 1, -1).expand(-1, C, -1)
+        idx_11 = (y1_int * Wf + x1_int).view(N, 1, -1).expand(-1, C, -1)
+
+        F00 = torch.gather(flat_features, 2, idx_00).view(N, C, Hc, Wc)
+        F10 = torch.gather(flat_features, 2, idx_10).view(N, C, Hc, Wc)
+        F01 = torch.gather(flat_features, 2, idx_01).view(N, C, Hc, Wc)
+        F11 = torch.gather(flat_features, 2, idx_11).view(N, C, Hc, Wc)
+
+        du_exp = du.unsqueeze(1)
+        dv_exp = dv.unsqueeze(1)
+
+        w00 = (1 - du_exp) * (1 - dv_exp)
+        w10 = du_exp * (1 - dv_exp)
+        w01 = (1 - du_exp) * dv_exp
+        w11 = du_exp * dv_exp
+
+        samples = F00 * w00 + F10 * w10 + F01 * w01 + F11 * w11
+
+        if not return_grad:
+            return samples, None, None
+
+        grad_u = (F10 - F00) * (1 - dv_exp) + (F11 - F01) * dv_exp
+        grad_v = (F01 - F00) * (1 - du_exp) + (F11 - F10) * du_exp
+        return samples, grad_u, grad_v
+    
+
+    @staticmethod
+    def _parse_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("", "none", "null"):
+                return default
+            return lowered in ("1", "true", "yes", "on")
+        return bool(value)
+    
+    @staticmethod
+    def _parse_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
 
 
 class EmbeddingSimilarityTerm(SolverTerm):
