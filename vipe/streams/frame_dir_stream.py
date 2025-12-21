@@ -36,7 +36,7 @@ class FrameDirStream(VideoStream):
         self._name = name if name is not None else path.name
 
         # Find all image files in the directory
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+        image_extensions = ['.jpg']
         self.frame_files = []
         for ext in image_extensions:
             self.frame_files.extend(sorted(path.glob(f'*{ext}')))
@@ -100,6 +100,9 @@ class FrameDirStream(VideoStream):
             raise ValueError(f"Could not read frame: {frame_path}")
 
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Aria dataset images are so big so I resize them before entering the pipeline
+        if self.frame_size()[0]>1000 and self.frame_size()[1] > 1000:
+            frame = cv2.resize(frame, (int(self.frame_size()[1]/3),int(self.frame_size()[0]/3)), interpolation=cv2.INTER_LINEAR)
         frame_rgb = torch.as_tensor(frame).float() / 255.0
         frame_rgb = frame_rgb.cuda()
 
