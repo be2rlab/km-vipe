@@ -177,7 +177,6 @@ weights/*
 **.txt
 tum_results
 **.pkl
-**.yaml
 **.zip
 **.npz
 **.packaging
