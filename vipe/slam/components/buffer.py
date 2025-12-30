@@ -46,6 +46,9 @@ from ..maths.retractor import DenseDispRetractor, IntrinsicsRetractor, PoseRetra
 from .sparse_tracks import SparseTracks
 from ..ba.kernel import AdaptiveBarronRobustKernel
 
+from ...priors.depth.unidepth import UniDepth2Model, UnidepthTRTModel
+import matplotlib.pyplot as plt
+
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,8 @@ class GraphBuffer:
         camera_type: CameraType,
         device: torch.device = torch.device("cuda"),
     ):
+        self.torch_model = UniDepth2Model()
+        self.trt_model = UnidepthTRTModel()
         if cross_view_idx is None:
             cross_view_idx = [(i + 1) % n_views for i in range(n_views)]
 
@@ -333,11 +338,102 @@ class GraphBuffer:
                 rgb=self.images[frame_idx].moveaxis(1, -1).float(), focal_length=focal_length, index=frame_idx
             )
             disp_sens = depth_model.estimate(depth_input).metric_depth
+            ###
+            # comparison between trt and torch
+            # self._compare_models(depth_input, frame_idx)
+            ###
             disp_sens = disp_sens[:, 3::8, 3::8]
             disp_sens = torch.where(disp_sens > 0, disp_sens.reciprocal(), disp_sens)
             self.disps_sens[frame_idx] = disp_sens
 
         self.last_depth_intrinsics = self.intrinsics.clone()
+
+    def _compare_models(self, depth_input, frame_idx):
+        torch_out = self.torch_model.estimate(depth_input)
+        trt_out = self.trt_model.estimate(depth_input)
+
+        torch_depth = torch_out.metric_depth
+        trt_depth = trt_out.metric_depth
+        # torch_rays = torch_out.rays
+        # trt_rays = trt_out.rays
+        # print(torch_rays)
+        # print(trt_rays)
+
+        metrics = {}
+
+        depth_diff = torch.abs(trt_depth - torch_depth)
+        metrics['depth_mae'] = depth_diff.mean().item()
+        metrics['depth_max_error'] = depth_diff.max().item()
+        metrics['depth_mse'] = torch.nn.functional.mse_loss(trt_depth, torch_depth).item()
+
+        print("\n📊 COMPARISON METRICS:")
+        print("-" * 40)
+        print(f"Depth MAE:            {metrics['depth_mae']:.6f}")
+        print(f"Depth Max Error:      {metrics['depth_max_error']:.6f}")
+        print(f"Depth MSE:            {metrics['depth_mse']:.6f}")
+        
+        # Determine if models are close enough
+        depth_mae = metrics['depth_mae']
+        if depth_mae < 0.001:
+            print("\n✅ EXCELLENT: Models are very close (MAE < 0.001)")
+        elif depth_mae < 0.01:
+            print("\n✅ GOOD: Models are reasonably close (MAE < 0.01)")
+        elif depth_mae < 0.1:
+            print("\n⚠️  WARNING: Models have noticeable differences (MAE < 0.1)")
+        else:
+            print("\n❌ ERROR: Models have significant differences (MAE >= 0.1)")
+
+        torch_depth = torch_depth.squeeze(0).cpu().numpy()
+        trt_depth = trt_depth.squeeze(0).cpu().numpy()
+
+        fig, axes = plt.subplots(2, 3, figsize=(20, 15))
+        # TensorRT depth
+        im1 = axes[0, 0].imshow(trt_depth, cmap='viridis')
+        axes[0, 0].set_title('TensorRT Depth')
+        axes[0, 0].axis('off')
+        plt.colorbar(im1, ax=axes[0, 0], fraction=0.046, pad=0.04)
+        
+        # PyTorch depth
+        im2 = axes[0, 1].imshow(torch_depth, cmap='viridis')
+        axes[0, 1].set_title('PyTorch Depth')
+        axes[0, 1].axis('off')
+        plt.colorbar(im2, ax=axes[0, 1], fraction=0.046, pad=0.04)
+        
+        # Depth difference
+        depth_diff = np.abs(trt_depth - torch_depth)
+        im3 = axes[0, 2].imshow(depth_diff, cmap='hot')
+        axes[0, 2].set_title('Depth Difference (Abs)')
+        axes[0, 2].axis('off')
+        plt.colorbar(im3, ax=axes[0, 2], fraction=0.046, pad=0.04)
+        
+        # Error histograms
+        axes[1, 0].hist(depth_diff.flatten(), bins=50, alpha=0.7, color='red', label='Depth')
+        # axes[2, 2].hist(conf_diff.flatten(), bins=50, alpha=0.7, color='blue', label='Confidence')
+        axes[1, 0].set_xlabel('Absolute Error')
+        axes[1, 0].set_ylabel('Frequency')
+        axes[1, 0].set_title('Error Distribution')
+        axes[1, 0].legend()
+        axes[1, 0].set_yscale('log')
+        
+        # Scatter plot: TRT vs PyTorch depth values (sampled)
+        # Sample every 10th pixel to avoid overcrowding
+        sample_mask = np.zeros_like(trt_depth, dtype=bool)
+        sample_mask[::10, ::10] = True
+        trt_sample = trt_depth[sample_mask]
+        torch_sample = torch_depth[sample_mask]
+        
+        axes[1, 1].scatter(torch_sample, trt_sample, alpha=0.5, s=1)
+        min_val = min(torch_sample.min(), trt_sample.min())
+        max_val = max(torch_sample.max(), trt_sample.max())
+        axes[1, 1].plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Match')
+        axes[1, 1].set_xlabel('PyTorch Depth')
+        axes[1, 1].set_ylabel('TensorRT Depth')
+        axes[1, 1].set_title('Depth Correlation')
+        axes[1, 1].legend()
+
+        plt.tight_layout()
+        plt.savefig(f"/home/user/km-vipe/model_comparison/frame_{frame_idx}.png", dpi=300, bbox_inches='tight')
+
 
     def build_adaptive_cross_view_idx(self, valid_thresh: float = 400.0):
         """

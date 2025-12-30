@@ -17,6 +17,7 @@ from .base import DepthEstimationInput, DepthEstimationModel, DepthEstimationRes
 
 
 def make_depth_model(model: str, dataset: str | None = None,dataset_path: str | None = None, scene: str | None = None):
+    print(f"Model name: {model}")
     if model == 'dataset':
         if dataset is not None:
             if dataset_path is not None:
@@ -50,6 +51,11 @@ def make_depth_model(model: str, dataset: str | None = None,dataset_path: str | 
         from .moge import MogeModel
 
         return MogeModel()
+
+    elif model_name == "unidepthtrt":
+        from .unidepth import UnidepthTRTModel
+
+        return UnidepthTRTModel()
 
     else:
         raise ValueError(f"Unknown depth model: {model}")

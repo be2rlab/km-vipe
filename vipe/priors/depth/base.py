@@ -56,6 +56,7 @@ class DepthEstimationResult:
     relative_inv_depth: torch.Tensor | None = None
     metric_depth: torch.Tensor | None = None
     confidence: torch.Tensor | None = None
+    rays: torch.Tensor | None = None
 
 
 @dataclass(slots=True, kw_only=True)

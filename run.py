@@ -43,6 +43,7 @@ def run(args: DictConfig) -> None:
         max_depth = int(max_depth_cfg) if max_depth_cfg not in (None, "null") else None
         report = profiler.report(min_percentage=min_percentage, max_depth=max_depth)
         output_path = getattr(profiler_cfg, "output", None) if profiler_cfg is not None else None
+        output_path += f"{stream_list[0].name()}.txt"
         if output_path:
             path = Path(output_path)
             path.parent.mkdir(parents=True, exist_ok=True)
